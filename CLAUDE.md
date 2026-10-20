@@ -28,7 +28,9 @@ assets/binary_v10/   v10 보정표 사본 (currency_stats.parquet, amount_stats.
 code/
   01_prepare_parquet.ipynb   CSV → 중복 제거·정렬 parquet + kyc + patterns
   02_build_features.ipynb    v10 피처 (엣지 17 · 노드 19) 계산
-  03_*.ipynb                 실험 (02 출력을 읽는다)
+  03_same_minute_analysis.ipynb  같은 분(EXCLUDE='1 minute') 사각 분석 — 라벨별 "같은 분 2건 이상" 비율·lift, 패턴별, 02 피처 사각, gap 분포
+                             → parquets/<DATASET>/analysis/same_minute*.json + png
+  03_*.ipynb                 그 외 실험 (02 출력을 읽는다)
 ```
 
 ## 참고 문서
