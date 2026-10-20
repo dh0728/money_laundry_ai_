@@ -30,7 +30,10 @@ code/
   02_build_features.ipynb    v10 피처 (엣지 17 · 노드 19) 계산
   03_same_minute_analysis.ipynb  같은 분(EXCLUDE='1 minute') 사각 분석 — 라벨별 "같은 분 2건 이상" 비율·lift, 패턴별, 02 피처 사각, gap 분포
                              → parquets/<DATASET>/analysis/same_minute*.json + png
-  03_*.ipynb                 그 외 실험 (02 출력을 읽는다)
+  03_1_same_minute_analysis_noReinvestment.ipynb  03 과 동일, Reinvestment 제외판 (결과 _noReinvestment 접미사; 03 json 있으면 끝에 비교표)
+  04_node_count_drift.ipynb  카운트형 노드 피처 8개의 월별 드리프트 — 누적 창 vs 고정 창(w90), 세탁/정상 계좌 단변량 AUC·중앙값 추이, 엣지 수준 AUC
+                             → parquets/<DATASET>/analysis/node_drift*.json + png
+  0N_*.ipynb                 그 외 실험 (01·02 출력을 읽는다)
 ```
 
 ## 참고 문서
