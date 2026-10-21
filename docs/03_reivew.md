@@ -5,9 +5,14 @@
 ## 라벨별 "같은 분 2건 이상" 비율
 
 **rate_normal / rate_laundering** : 그 라벨 거래 중 같은 분에 다른 거래가 1건 이상 있는 비율 (n ≥ 2)
+
 **precision** : 같은 분 2건 이상인 거래 중 라벨1 비율 = P(세탁 | siblings>0)
+
 **lift** : precision / 전체 라벨1 비율. 1 이면 정보 없음
+
 **recall** : 라벨1 중 siblings>0 인 비율 (= rate_laundering) — 이 비율만큼의 세탁 거래가 현재 피처에서 "같은 분 정보 없음"으로 들어간다
+
+- tx(거래) · normal(라벨0) · multi(같은 분에 2건 이상)
 
 > sender에서 자금세탁에 경우 49.63프로가 같은 분에 다른 사람에게 보낸 적이 있음
 
