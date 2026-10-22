@@ -33,6 +33,13 @@ code/
   03_1_same_minute_analysis_noReinvestment.ipynb  03 과 동일, Reinvestment 제외판 (결과 _noReinvestment 접미사; 03 json 있으면 끝에 비교표)
   04_node_count_drift.ipynb  카운트형 노드 피처 8개의 월별 드리프트 — 누적 창 vs 고정 창(w90), 세탁/정상 계좌 단변량 AUC·중앙값 추이, 엣지 수준 AUC
                              → parquets/<DATASET>/analysis/node_drift*.json + png
+  05_sampling_select.py      다운샘플링 실험 ① 학습에 넣을 정상 target 선택 (none/random/hard/cssmc × ratio) → parquets/<DATASET>/sampling/select/
+  05_sampling_audit.py       ①b 선택 결과 통계 감사(학습 무관): 피처 KL/PSI/KS, 일별 보존율, 시간대 JSD, 세탁계좌 연루 비율, 양성 1홉 보존 → select/<name>/audit.json
+  05_sampling_train.py       ② 실험 조건 1개 학습·평가 = select × apply(loss|struct) × reweight(ipw|none) × pi_eff × seed → sampling/runs/<run>/run.json
+  05_sampling_collect.py     ③ runs/*/run.json → sampling/results/ (runs.csv, summary.csv, ratio_curves.png)
+  sampling_lib.py            05 공통: GraphStore(v10 과 같은 2홉 그래프, memmap 캐시), BinaryGNN(v10 network.py 와 같은 층), 가중 지표
+                             설계 메모: 지도 샘플링(loss)=그래프 유지·loss target 만 선택, 구조 샘플링(struct)=adjacency 에서도 제거(구조-A).
+                             r(정상:양성)과 pi_eff(양성 손실 비중)를 분리 — pos_weight 는 pi_eff 에서 역산. 검증은 양성 전부 + 정상 2% 가중 표본(공유)
   0N_*.ipynb                 그 외 실험 (01·02 출력을 읽는다)
 ```
 
