@@ -3,6 +3,7 @@
     python 05_sampling_select.py --method random --ratio 30 --train 2022-08-08:2022-09-27
     python 05_sampling_select.py --method hard   --ratio 30 --hard-frac 0.5
     python 05_sampling_select.py --method cssmc  --ratio 30 --clusters 30 --candidates 10
+    python 05_sampling_select.py --method strata --ratio 30 --axes day,amount,cross_bank   # 다축 비례 층화
     python 05_sampling_select.py --method none                      # 전부 (샘플링 없음 기준선)
 
 출력 selected.parquet 컬럼
@@ -60,6 +61,46 @@ def select_hard(lab, ratio, rng, con, window, hard_frac):
     return pd.concat(parts)
 
 
+def select_strata(lab, ratio, con, window, axes, amount_bins, feat_dir, seed):
+    """다축 비례 층화. 층 = axes 의 조합, 층별 할당 = 그날 예산 × (층 정상 수 / 그날 정상 수) 반올림.
+    최소 1건 강제는 하지 않는다 (희소 층 과대표집 방지). stratum = 축값을 ':' 로 이은 문자열, IPW 층별.
+      day        날짜
+      amount     paid_currency_z (통화 보정 금액 z) 를 학습 정상 분위수로 amount_bins 구간
+      recent     sender_count_1h (최근 1시간 송신 횟수, ln(1+n)) → 0 / 1~2 / 3~10 / 11+
+      cross_bank from_bank <> to_bank
+      new_pair   pair_prior_count == 0 (이 계좌쌍의 첫 거래)
+    Reservoir 는 스트리밍용 구현이고 여기선 DuckDB 의 PARTITION BY + hash 순서가 같은 일을 한다."""
+    a, b = window; tx = L.q(L.BASE / "transactions.parquet"); ef = L.q(feat_dir / "edge_features.parquet")
+    b_day = budget_per_day(lab, ratio)
+    con.register("budget", pd.DataFrame({"day": pd.to_datetime(b_day.index), "budget": b_day.to_numpy()}))
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE base AS
+        SELECT t.edge_id, t.day, (t.from_bank <> t.to_bank) AS cross_bank, e.paid_currency_z, e.sender_count_1h, e.pair_prior_count
+        FROM read_parquet({tx}) t JOIN read_parquet({ef}) e USING (edge_id)
+        WHERE t.day BETWEEN DATE '{a}' AND DATE '{b}' AND NOT t.is_laundering""")
+    cuts = con.execute(f"SELECT quantile_cont(paid_currency_z, [{', '.join(str(i / amount_bins) for i in range(1, amount_bins))}]) FROM base").fetchone()[0]
+    expr = {"day": "day::VARCHAR",
+            "amount": "CASE " + " ".join(f"WHEN paid_currency_z <= {c} THEN 'a{i}'" for i, c in enumerate(cuts)) + f" ELSE 'a{len(cuts)}' END",
+            "recent": "CASE WHEN sender_count_1h = 0 THEN 'r0' WHEN sender_count_1h <= ln(3) THEN 'r1' WHEN sender_count_1h <= ln(11) THEN 'r2' ELSE 'r3' END",
+            "cross_bank": "CASE WHEN cross_bank THEN 'x' ELSE 'i' END",
+            "new_pair": "CASE WHEN pair_prior_count = 0 THEN 'new' ELSE 'old' END"}
+    unknown = set(axes) - set(expr); assert not unknown, f"모르는 축 {unknown}"
+    stratum = " || ':' || ".join(expr[x] for x in axes)
+    picked = con.execute(f"""
+        WITH s AS (SELECT edge_id, day, {stratum} AS stratum FROM base),
+             n AS (SELECT stratum, day, count(*) AS n_s FROM s GROUP BY 1, 2),
+             d AS (SELECT day, count(*) AS n_d FROM s GROUP BY 1),
+             quota AS (SELECT n.stratum, n.day, n.n_s, least(n.n_s, round(b.budget * n.n_s / d.n_d)::BIGINT) AS k
+                       FROM n JOIN d USING (day) JOIN budget b USING (day))
+        SELECT s.edge_id, s.day, s.stratum, q.n_s::DOUBLE / q.k AS ipw
+        FROM s JOIN quota q USING (stratum, day)
+        QUALIFY row_number() OVER (PARTITION BY s.stratum, s.day ORDER BY hash(s.edge_id, {seed}), s.edge_id) <= q.k
+        ORDER BY s.edge_id""").df()
+    n_strata = con.execute("SELECT count(DISTINCT stratum) FROM (SELECT " + stratum + " AS stratum FROM base)").fetchone()[0]
+    L.log(f"strata({','.join(axes)}): 층 {n_strata:,}개, 선택 {len(picked):,}건 (예산 합 {int(b_day.sum()):,})")
+    con.execute("DROP TABLE base"); con.unregister("budget")
+    return lab.merge(picked[["edge_id", "stratum", "ipw"]], on="edge_id", how="inner")
+
+
 def select_cssmc(lab, ratio, rng, store_feat: np.ndarray, clusters, candidates):
     """CSSMC 축약판 (은총님 §6 와 세부가 다를 수 있음 — 비교 전에 맞출 것).
     1) 학습 정상 표준화 17피처로 MiniBatchKMeans  2) 군집 비례 배분으로 후보 subset candidates 개 (시작 오프셋만 다름)
@@ -93,16 +134,20 @@ def select_cssmc(lab, ratio, rng, store_feat: np.ndarray, clusters, candidates):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--method", required=True, choices=["none", "random", "hard", "cssmc"])
+    ap.add_argument("--method", required=True, choices=["none", "random", "hard", "cssmc", "strata"])
     ap.add_argument("--ratio", type=float, default=None, help="정상:양성 (일별). none 이면 생략")
     ap.add_argument("--train", default="2022-08-08:2022-09-27")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--hard-frac", type=float, default=0.5)
     ap.add_argument("--clusters", type=int, default=30); ap.add_argument("--candidates", type=int, default=10)
+    ap.add_argument("--axes", default="day,amount,cross_bank", help="strata 축 (day,amount,recent,cross_bank,new_pair 중 콤마 구분)")
+    ap.add_argument("--amount-bins", type=int, default=5)
     ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     assert a.method == "none" or a.ratio, "--ratio 필요"
     name = "none" if a.method == "none" else f"{a.method}_r{a.ratio:g}"
+    if a.method == "strata":
+        name += "_" + "-".join(x.strip() for x in a.axes.split(","))
     out = L.SAMPLING / "select" / name; out.mkdir(parents=True, exist_ok=True)
     if (out / "selected.parquet").exists():
         L.log(f"이미 있음: {out}"); return
@@ -116,6 +161,8 @@ def main(argv=None):
         neg = select_random(lab, a.ratio, rng)
     elif a.method == "hard":
         neg = select_hard(lab, a.ratio, rng, con, window, a.hard_frac)
+    elif a.method == "strata":
+        neg = select_strata(lab, a.ratio, con, window, [x.strip() for x in a.axes.split(",")], a.amount_bins, L.features_dir(a.features), a.seed)
     else:
         store = L.GraphStore(a.features, threads=a.threads, memory=a.memory); store.prepare(); store.load()
         neg = select_cssmc(lab, a.ratio, rng, store.edge_x, a.clusters, a.candidates)
@@ -123,7 +170,7 @@ def main(argv=None):
     sel.to_parquet(out / "selected.parquet", index=False)
     daily = sel.groupby("day").agg(pos=("y", "sum"), neg=("y", lambda s: int((s == 0).sum())))
     L.json_write(out / "meta.json", dict(method=a.method, ratio=a.ratio, train=a.train, seed=a.seed, hard_frac=a.hard_frac,
-                                         clusters=a.clusters, candidates=a.candidates, rows=len(sel), pos=int(pos.shape[0]), neg=int(neg.shape[0]),
+                                         clusters=a.clusters, candidates=a.candidates, axes=(a.axes if a.method == "strata" else None), rows=len(sel), pos=int(pos.shape[0]), neg=int(neg.shape[0]),
                                          neg_population=int((lab.y == 0).sum()), ipw_sum_neg=float(neg.ipw.sum()),
                                          daily_keep_min=float((daily.neg / lab[lab.y == 0].groupby("day").size()).min()),
                                          daily_keep_max=float((daily.neg / lab[lab.y == 0].groupby("day").size()).max()),
