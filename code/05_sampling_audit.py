@@ -41,13 +41,7 @@ def jsd(p, q):
 
 
 def read_features(con, feat_dir, edge_ids: np.ndarray) -> np.ndarray:
-    """edge_features.parquet 에서 주어진 edge_id 의 17개 피처를 edge_id 순으로. (memmap 무작위 접근은 페이지 캐시를 수 GB 먹어서 cgroup 한도를 넘김)"""
-    con.register("want_ids", pd.DataFrame({"edge_id": np.asarray(edge_ids, np.int64)}))
-    cols = ", ".join(f'"{c}"' for c in L.EDGE_FEATURES)
-    df = con.execute(f"SELECT e.edge_id, {cols} FROM read_parquet({L.q(feat_dir / 'edge_features.parquet')}) e JOIN want_ids USING (edge_id) ORDER BY e.edge_id").df()
-    con.unregister("want_ids")
-    assert len(df) == len(edge_ids), f"피처 누락 {len(edge_ids) - len(df)}건"
-    return df[L.EDGE_FEATURES].to_numpy(np.float32)
+    return L.read_edge_features(con, feat_dir, edge_ids)[L.EDGE_FEATURES].to_numpy(np.float32)
 
 
 def audit_one(name: str, con, feat_dir):

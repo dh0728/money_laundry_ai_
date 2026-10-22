@@ -27,7 +27,7 @@ def main(show=True):
     out = L.SAMPLING / "results"; out.mkdir(exist_ok=True)
     df.sort_values(["method", "apply", "reweight", "pi_eff", "ratio", "seed"]).to_csv(out / "runs.csv", index=False)
 
-    keys = ["method", "ratio", "apply", "reweight", "pi_eff"]
+    keys = ["select", "method", "ratio", "apply", "reweight", "pi_eff"]
     metrics = ["AP", "F1", "recall_at_1pct", "unmatched_recall_at_1pct", "ECE", "train_sec_per_epoch"]
     summ = df.groupby(keys)[metrics].agg(["mean", "std", "count"]).round(4)
     summ.to_csv(out / "summary.csv")
@@ -46,7 +46,7 @@ def main(show=True):
     try:
         import matplotlib.pyplot as plt
         fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
-        for (meth, ap_, rw, pi), g in df[df.method != "none"].groupby(["method", "apply", "reweight", "pi_eff"]):
+        for (meth, ap_, rw, pi), g in df[df.method != "none"].assign(method=lambda d: d.select.str.replace(r"_r[0-9.]+", "", regex=True)).groupby(["method", "apply", "reweight", "pi_eff"]):
             m = g.groupby("ratio").AP.agg(["mean", "std"]).sort_index()
             for ax, col in zip(axes, ["AP", "recall_at_1pct", "ECE"]):
                 mm = g.groupby("ratio")[col].agg(["mean", "std"]).sort_index()

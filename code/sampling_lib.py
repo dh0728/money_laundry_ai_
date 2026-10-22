@@ -96,6 +96,17 @@ def load_labels(con, window: tuple[str, str], patterns=True) -> pd.DataFrame:
         ORDER BY t.edge_id""").df()
 
 
+def read_edge_features(con, feat_dir: Path, edge_ids: np.ndarray, extra_cols=()) -> pd.DataFrame:
+    """edge_features.parquet 에서 주어진 edge_id 행만 edge_id 순으로 (17피처 + extra_cols).
+    memmap 무작위 접근은 페이지 캐시를 수 GB 먹어 cgroup 한도를 넘기므로, 큰 집합은 이걸로 읽는다 (parquet 스캔 1회)."""
+    con.register("want_ids", pd.DataFrame({"edge_id": np.asarray(edge_ids, np.int64)}))
+    cols = ", ".join(f'e."{c}"' for c in list(EDGE_FEATURES) + list(extra_cols))
+    df = con.execute(f"SELECT e.edge_id, {cols} FROM read_parquet({q(feat_dir / 'edge_features.parquet')}) e JOIN want_ids USING (edge_id) ORDER BY e.edge_id").df()
+    con.unregister("want_ids")
+    assert len(df) == len(np.unique(edge_ids)), f"피처 누락 {len(np.unique(edge_ids)) - len(df)}건"
+    return df
+
+
 # ----------------------------------------------------------------------------- 그래프 저장소
 class GraphStore:
     """v10 GraphSnapshot 과 같은 2홉 그래프를 numpy memmap 으로 만든다.

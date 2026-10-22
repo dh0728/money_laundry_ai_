@@ -101,35 +101,59 @@ def select_strata(lab, ratio, con, window, axes, amount_bins, feat_dir, seed):
     return lab.merge(picked[["edge_id", "stratum", "ipw"]], on="edge_id", how="inner")
 
 
-def select_cssmc(lab, ratio, rng, store_feat: np.ndarray, clusters, candidates):
+def select_cssmc(lab, ratio, rng, con, feat_dir, clusters, candidates, ref_rows=500_000, kl_rows=2_000_000, chunk=5_000_000):
     """CSSMC 축약판 (은총님 §6 와 세부가 다를 수 있음 — 비교 전에 맞출 것).
-    1) 학습 정상 표준화 17피처로 MiniBatchKMeans  2) 군집 비례 배분으로 후보 subset candidates 개 (시작 오프셋만 다름)
-    3) 피처별 히스토그램 KL(모집단 ‖ 후보) 평균이 최소인 후보 선택.  stratum = cluster (IPW 군집별)."""
+    1) 학습 정상 중 ref_rows 건 무작위 참조로 표준화 + MiniBatchKMeans
+    2) 전체 학습 정상에 군집 라벨 — edge_features.parquet 를 edge_id 구간 청크로 읽어 predict (메모리: 청크 × 17 × 4B)
+    3) 군집 비례 예산으로 후보 subset candidates 개 (군집 안 순서의 시작 오프셋만 다름)
+    4) 후보마다 KL(모집단 ‖ 후보) — 모집단·후보 각각 kl_rows 표본, 피처는 parquet 1회 조인으로 읽음
+    stratum = 군집, IPW = 군집 모집단 / 군집 선택 수."""
     from sklearn.cluster import MiniBatchKMeans
     from sklearn.preprocessing import StandardScaler
-    neg = lab[lab.y == 0].reset_index(drop=True); X = store_feat[neg.edge_id.to_numpy()]
-    ref = X[rng.choice(len(X), min(len(X), 500_000), replace=False)]
-    sc = StandardScaler().fit(ref); km = MiniBatchKMeans(clusters, random_state=0, batch_size=8192, n_init=3).fit(sc.transform(ref))
-    lab_c = km.predict(sc.transform(X)); counts = np.bincount(lab_c, minlength=clusters)
-    total = int(budget_per_day(lab, ratio).sum()); quota = np.maximum(1, np.round(counts / counts.sum() * total)).astype(int)
-    bins = [np.unique(np.quantile(ref[:, j], np.linspace(0, 1, 21)[1:-1])) for j in range(X.shape[1])]
-    def kl(idx):
-        v = 0.0
-        for j in range(X.shape[1]):
-            p = np.histogram(X[:, j], np.r_[-np.inf, bins[j], np.inf])[0] + 1e-8; p /= p.sum()
-            qq = np.histogram(X[idx, j], np.r_[-np.inf, bins[j], np.inf])[0] + 1e-8; qq /= qq.sum()
-            v += float(np.sum(p * np.log(p / qq)))
-        return v / X.shape[1]
-    order = [np.flatnonzero(lab_c == c) for c in range(clusters)]
-    best = None
+    neg_ids = np.sort(lab.loc[lab.y == 0, "edge_id"].to_numpy(np.int64)); N = len(neg_ids)
+    # 1) 참조 표본으로 군집 적합
+    ref_ids = np.sort(rng.choice(neg_ids, min(N, ref_rows), replace=False))
+    Xr = L.read_edge_features(con, feat_dir, ref_ids)[L.EDGE_FEATURES].to_numpy(np.float32)
+    sc = StandardScaler().fit(Xr); km = MiniBatchKMeans(clusters, random_state=0, batch_size=8192, n_init=3).fit(sc.transform(Xr))
+    # 2) 전체 정상 라벨 (청크)
+    labels = np.empty(N, np.int16); con.register("neg_ids_all", pd.DataFrame({"edge_id": neg_ids}))
+    cols = ", ".join(f'e."{c}"' for c in L.EDGE_FEATURES)
+    for a in range(0, int(neg_ids[-1]) + 1, chunk):
+        df = con.execute(f"""SELECT e.edge_id, {cols} FROM read_parquet({L.q(feat_dir / 'edge_features.parquet')}) e JOIN neg_ids_all USING (edge_id)
+                             WHERE e.edge_id >= {a} AND e.edge_id < {a + chunk} ORDER BY e.edge_id""").df()
+        if len(df):
+            pos = np.searchsorted(neg_ids, df.edge_id.to_numpy(np.int64))
+            labels[pos] = km.predict(sc.transform(df[L.EDGE_FEATURES].to_numpy(np.float32)))
+        L.log(f"  cssmc 라벨 {min(a + chunk, int(neg_ids[-1]) + 1):,}/{int(neg_ids[-1]) + 1:,}")
+    con.unregister("neg_ids_all")
+    counts = np.bincount(labels, minlength=clusters)
+    total = int(budget_per_day(lab, ratio).sum()); quota = np.minimum(counts, np.round(counts / counts.sum() * total)).astype(int)
+    # 3) 후보 subset (군집별 멤버를 hash 순으로 섞은 뒤 오프셋)
+    order = np.argsort(labels, kind="stable"); offs = np.searchsorted(labels[order], np.arange(clusters + 1))
+    members = [order[offs[c]:offs[c + 1]] for c in range(clusters)]
+    members = [m[rng.permutation(len(m))] for m in members]
+    cands = []
     for cand in range(candidates):
-        idx = np.concatenate([o[(np.arange(min(quota[c], len(o))) * candidates + cand) % len(o)] for c, o in enumerate(order) if len(o)])
-        idx = np.unique(idx); v = kl(idx)
-        L.log(f"  cssmc 후보 {cand}: {len(idx):,}건 KL={v:.5f}")
-        if best is None or v < best[0]: best = (v, idx)
-    pick = neg.iloc[best[1]].copy(); pick["stratum"] = ["c" + str(c) for c in lab_c[best[1]]]
-    chosen = np.bincount(lab_c[best[1]], minlength=clusters); pick["ipw"] = counts[lab_c[best[1]]] / np.maximum(chosen[lab_c[best[1]]], 1)
-    return pick
+        idx = np.concatenate([m[(np.arange(quota[c]) * candidates + cand) % len(m)] for c, m in enumerate(members) if len(m) and quota[c]])
+        cands.append(np.unique(idx))
+    # 4) KL — 모집단 표본 + 후보별 표본의 피처를 한 번에 읽음
+    pop_s = np.sort(rng.choice(neg_ids, min(N, kl_rows), replace=False))
+    cand_s = [np.sort(rng.choice(neg_ids[c], min(len(c), kl_rows), replace=False)) for c in cands]
+    feats = L.read_edge_features(con, feat_dir, np.unique(np.concatenate([pop_s, *cand_s]))).set_index("edge_id")[L.EDGE_FEATURES]
+    Xp = feats.loc[pop_s].to_numpy(np.float32)
+    bins = [np.unique(np.quantile(Xp[:, j], np.linspace(0, 1, 21)[1:-1])) for j in range(Xp.shape[1])]
+    P = [np.histogram(Xp[:, j], np.r_[-np.inf, bins[j], np.inf])[0] + 1e-8 for j in range(Xp.shape[1])]; P = [p / p.sum() for p in P]
+    best = None
+    for cand, ids_s in enumerate(cand_s):
+        Xc = feats.loc[ids_s].to_numpy(np.float32); v = 0.0
+        for j in range(Xc.shape[1]):
+            qq = np.histogram(Xc[:, j], np.r_[-np.inf, bins[j], np.inf])[0] + 1e-8; qq /= qq.sum()
+            v += float(np.sum(P[j] * np.log(P[j] / qq)))
+        v /= Xc.shape[1]; L.log(f"  cssmc 후보 {cand}: {len(cands[cand]):,}건 KL={v:.5f}")
+        if best is None or v < best[0]: best = (v, cand)
+    idx = cands[best[1]]; lab_c = labels[idx]; chosen = np.bincount(lab_c, minlength=clusters)
+    pick = pd.DataFrame({"edge_id": neg_ids[idx], "stratum": ["c" + str(c) for c in lab_c], "ipw": counts[lab_c] / np.maximum(chosen[lab_c], 1)})
+    return lab.merge(pick, on="edge_id", how="inner")
 
 
 def main(argv=None):
@@ -164,8 +188,7 @@ def main(argv=None):
     elif a.method == "strata":
         neg = select_strata(lab, a.ratio, con, window, [x.strip() for x in a.axes.split(",")], a.amount_bins, L.features_dir(a.features), a.seed)
     else:
-        store = L.GraphStore(a.features, threads=a.threads, memory=a.memory); store.prepare(); store.load()
-        neg = select_cssmc(lab, a.ratio, rng, store.edge_x, a.clusters, a.candidates)
+        neg = select_cssmc(lab, a.ratio, rng, con, L.features_dir(a.features), a.clusters, a.candidates)
     sel = pd.concat([pos, neg]).sort_values("edge_id").reset_index(drop=True)
     sel.to_parquet(out / "selected.parquet", index=False)
     daily = sel.groupby("day").agg(pos=("y", "sum"), neg=("y", lambda s: int((s == 0).sum())))
