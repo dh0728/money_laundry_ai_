@@ -18,6 +18,7 @@ import numpy as np, pandas as pd
 import sampling_lib as L
 
 BINS = 20
+MAX_ROWS = 2_000_000      # 피처 분포 비교에 쓰는 최대 행 수 (모집단·표본 각각)
 
 
 def hist_divergences(pop: np.ndarray, sel: np.ndarray, w: np.ndarray | None = None) -> dict:
@@ -44,15 +45,21 @@ def audit_one(name: str, con, store: L.GraphStore):
     sel = pd.read_parquet(d / "selected.parquet"); meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
     window = L.parse_window(meta["train"]); a, b = window
     lab = L.load_labels(con, window, patterns=False)
-    pop = lab[lab.y == 0]; smp = sel[sel.y == 0]
+    pop = lab.loc[lab.y == 0, ["edge_id", "day"]]; smp = sel[sel.y == 0]; del lab
     out = dict(select=name, method=meta["method"], ratio=meta["ratio"], n_pop=len(pop), n_sel=len(smp), keep_rate=len(smp) / len(pop))
 
-    # 1) 피처 분포 — 모집단은 최대 200만 건 무작위 참조(메모리), 표본은 전부
+    # 1) 피처 분포 — 모집단·표본 모두 최대 MAX_ROWS 건 무작위 (메모리: 200만×17×4B ≈ 136MB). none 은 모집단=표본이라 생략
     rng = np.random.default_rng(0)
-    ref = pop.edge_id.to_numpy()[rng.choice(len(pop), min(len(pop), 2_000_000), replace=False)]
-    X_pop = np.asarray(store.edge_x[np.sort(ref)]); X_sel = np.asarray(store.edge_x[smp.edge_id.to_numpy()])
-    out["feature_raw"] = hist_divergences(X_pop, X_sel)
-    out["feature_ipw"] = hist_divergences(X_pop, X_sel, smp.ipw.to_numpy())
+    if meta["method"] == "none":
+        zero = dict(kl_mean=0.0, kl_max=0.0, kl_max_feature=None, psi_mean=0.0, ks_mean=0.0)
+        out["feature_raw"] = dict(zero); out["feature_ipw"] = dict(zero)
+    else:
+        ref = np.sort(pop.edge_id.to_numpy()[rng.choice(len(pop), min(len(pop), MAX_ROWS), replace=False)])
+        pick = np.sort(rng.choice(len(smp), min(len(smp), MAX_ROWS), replace=False))
+        X_pop = np.asarray(store.edge_x[ref]); X_sel = np.asarray(store.edge_x[smp.edge_id.to_numpy()[pick]])
+        out["feature_raw"] = hist_divergences(X_pop, X_sel)
+        out["feature_ipw"] = hist_divergences(X_pop, X_sel, smp.ipw.to_numpy()[pick])
+        del X_pop, X_sel
 
     # 2) 시간 구조
     kp = smp.groupby("day").size() / pop.groupby("day").size()
@@ -67,10 +74,11 @@ def audit_one(name: str, con, store: L.GraphStore):
     con.execute(f"""CREATE OR REPLACE TEMP TABLE t AS SELECT edge_id, ts, src, dst, is_laundering FROM read_parquet({tx})
                     WHERE day BETWEEN DATE '{a}' AND DATE '{b}'""")
     con.execute("CREATE OR REPLACE TEMP TABLE pos_nodes AS SELECT src AS node_id FROM t WHERE is_laundering UNION SELECT dst FROM t WHERE is_laundering")
+    con.execute("CREATE OR REPLACE TEMP TABLE pos_minute AS SELECT DISTINCT src, ts FROM t WHERE is_laundering")
     con.execute("""CREATE OR REPLACE TEMP TABLE flags AS
         SELECT n.edge_id, (n.src IN (SELECT node_id FROM pos_nodes) OR n.dst IN (SELECT node_id FROM pos_nodes)) AS hard,
-               EXISTS (SELECT 1 FROM t p WHERE p.is_laundering AND p.src = n.src AND p.ts = n.ts AND p.edge_id <> n.edge_id) AS sibling
-        FROM t n WHERE NOT n.is_laundering""")
+               (m.src IS NOT NULL) AS sibling
+        FROM t n LEFT JOIN pos_minute m ON m.src = n.src AND m.ts = n.ts WHERE NOT n.is_laundering""")
     fp = con.execute("SELECT avg(hard::INT), avg(sibling::INT) FROM flags").fetchone()
     fs = con.execute("SELECT avg(hard::INT), avg(sibling::INT) FROM flags JOIN sel_ids USING (edge_id)").fetchone()
     out.update(hard_frac_pop=float(fp[0]), hard_frac_sel=float(fs[0]), sibling_frac_pop=float(fp[1]), sibling_frac_sel=float(fs[1]))
