@@ -56,10 +56,13 @@ def log(msg: str):
     print(time.strftime("[%H:%M:%S]"), msg, flush=True)
 
 
-def connect(threads=8, memory="20GB", path: Path | None = None):
+def connect(threads=8, memory="12GB", path: Path | None = None):
+    """memory 는 DuckDB 한도. 컨테이너 cgroup 한도(27GB) 안에서 파이썬 배열·페이지 캐시와 나눠 써야 하므로 절반 이하로.
+    temp_directory 를 두어 한도를 넘는 중간 결과는 디스크로 스필한다 (메모리 DB 는 기본으로 스필 못 함)."""
     con = duckdb.connect(str(path) if path else ":memory:")
+    tmp = SAMPLING / "duckdb_tmp"; tmp.mkdir(parents=True, exist_ok=True)
     con.execute(f"SET threads={threads}"); con.execute(f"SET memory_limit='{memory}'")
-    con.execute("SET preserve_insertion_order=false")
+    con.execute(f"SET temp_directory={q(tmp)}"); con.execute("SET preserve_insertion_order=false")
     return con
 
 

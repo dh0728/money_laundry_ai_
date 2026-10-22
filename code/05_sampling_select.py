@@ -99,7 +99,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--hard-frac", type=float, default=0.5)
     ap.add_argument("--clusters", type=int, default=30); ap.add_argument("--candidates", type=int, default=10)
-    ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="20GB")
+    ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     assert a.method == "none" or a.ratio, "--ratio 필요"
     name = "none" if a.method == "none" else f"{a.method}_r{a.ratio:g}"

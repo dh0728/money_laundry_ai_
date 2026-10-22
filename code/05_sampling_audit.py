@@ -40,7 +40,17 @@ def jsd(p, q):
     return (f(p, m) + f(q, m)) / 2
 
 
-def audit_one(name: str, con, store: L.GraphStore):
+def read_features(con, feat_dir, edge_ids: np.ndarray) -> np.ndarray:
+    """edge_features.parquet 에서 주어진 edge_id 의 17개 피처를 edge_id 순으로. (memmap 무작위 접근은 페이지 캐시를 수 GB 먹어서 cgroup 한도를 넘김)"""
+    con.register("want_ids", pd.DataFrame({"edge_id": np.asarray(edge_ids, np.int64)}))
+    cols = ", ".join(f'"{c}"' for c in L.EDGE_FEATURES)
+    df = con.execute(f"SELECT e.edge_id, {cols} FROM read_parquet({L.q(feat_dir / 'edge_features.parquet')}) e JOIN want_ids USING (edge_id) ORDER BY e.edge_id").df()
+    con.unregister("want_ids")
+    assert len(df) == len(edge_ids), f"피처 누락 {len(edge_ids) - len(df)}건"
+    return df[L.EDGE_FEATURES].to_numpy(np.float32)
+
+
+def audit_one(name: str, con, feat_dir):
     d = L.SAMPLING / "select" / name; t0 = time.time()
     sel = pd.read_parquet(d / "selected.parquet"); meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
     window = L.parse_window(meta["train"]); a, b = window
@@ -56,7 +66,7 @@ def audit_one(name: str, con, store: L.GraphStore):
     else:
         ref = np.sort(pop.edge_id.to_numpy()[rng.choice(len(pop), min(len(pop), MAX_ROWS), replace=False)])
         pick = np.sort(rng.choice(len(smp), min(len(smp), MAX_ROWS), replace=False))
-        X_pop = np.asarray(store.edge_x[ref]); X_sel = np.asarray(store.edge_x[smp.edge_id.to_numpy()[pick]])
+        X_pop = read_features(con, feat_dir, ref); X_sel = read_features(con, feat_dir, smp.edge_id.to_numpy()[pick])
         out["feature_raw"] = hist_divergences(X_pop, X_sel)
         out["feature_ipw"] = hist_divergences(X_pop, X_sel, smp.ipw.to_numpy()[pick])
         del X_pop, X_sel
@@ -88,6 +98,9 @@ def audit_one(name: str, con, store: L.GraphStore):
                          FROM t n LEFT JOIN sel_ids s USING (edge_id)
                          WHERE n.src IN (SELECT node_id FROM pos_nodes) OR n.dst IN (SELECT node_id FROM pos_nodes)""").fetchone()
     out["struct_pos_hop1_keep"] = float(row[0])
+    for tbl in ("flags", "pos_minute", "pos_nodes", "t"):
+        con.execute(f"DROP TABLE IF EXISTS {tbl}")
+    con.unregister("sel_ids")
     out["seconds"] = round(time.time() - t0, 1)
     L.json_write(d / "audit.json", out)
     L.log(f"{name}: KL raw {out['feature_raw']['kl_mean']:.5f} / ipw {out['feature_ipw']['kl_mean']:.5f}, 일별보존 {out['daily_keep_ratio']:.2f}배, "
@@ -98,14 +111,15 @@ def audit_one(name: str, con, store: L.GraphStore):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--select"); ap.add_argument("--all", action="store_true"); ap.add_argument("--force", action="store_true")
-    ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="20GB")
+    ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     names = sorted(p.name for p in (L.SAMPLING / "select").iterdir() if (p / "selected.parquet").exists()) if a.all else [a.select]
-    con = L.connect(a.threads, a.memory); store = L.GraphStore(a.features, threads=a.threads, memory=a.memory); store.prepare(); store.load()
+    con = L.connect(a.threads, a.memory); feat_dir = L.features_dir(a.features)
     for n in names:
         if (L.SAMPLING / "select" / n / "audit.json").exists() and not a.force:
             L.log(f"감사 있음: {n}"); continue
-        audit_one(n, con, store)
+        audit_one(n, con, feat_dir)
+    con.close()
 
 
 if __name__ == "__main__":
