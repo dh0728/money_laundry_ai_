@@ -58,7 +58,7 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=5); ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--batch", type=int, default=32, help="target 수. 2홉 그래프가 target 당 최대 4만 간선이라 크게 못 잡음"); ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--max-train-targets", type=int, default=None, help="에폭당 target 상한(시간 측정·스모크용)")
-    ap.add_argument("--device", default="auto"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="20GB")
+    ap.add_argument("--device", default="auto"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     import torch
     device = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
@@ -90,6 +90,7 @@ def main(argv=None):
     # --- 검증 표본 ---------------------------------------------------------------
     val = val_sample(con, L.parse_window(a.val), a.val_neg_rate, 0)
     assert not set(val.edge_id).intersection(sel.edge_id), "학습·검증 겹침"
+    con.close()                                   # 학습 중엔 memmap 페이지 캐시가 커지므로 DuckDB 메모리를 비워 둔다
 
     # --- 학습 ----------------------------------------------------------------------
     torch.manual_seed(a.seed); np.random.seed(a.seed)
