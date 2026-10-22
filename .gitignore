@@ -7,3 +7,4 @@
 *.duckdb
 *.duckdb.wal
 *.duckdb.tmp/
+__pycache__/
