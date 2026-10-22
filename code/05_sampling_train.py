@@ -46,7 +46,7 @@ def predict(model, store, edge_ids, batch, device):
     return np.concatenate(out)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--select", required=True, help="select/<이름> (예: random_r30, none)")
     ap.add_argument("--apply", choices=["loss", "struct"], default="loss")
@@ -59,7 +59,7 @@ def main():
     ap.add_argument("--batch", type=int, default=32, help="target 수. 2홉 그래프가 target 당 최대 4만 간선이라 크게 못 잡음"); ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--max-train-targets", type=int, default=None, help="에폭당 target 상한(시간 측정·스모크용)")
     ap.add_argument("--device", default="auto"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="20GB")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     import torch
     device = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
     run_name = f"{a.select}_{a.apply}_{a.reweight}_pi{a.pi_eff:g}_s{a.seed}" + ("" if a.features == "features" else f"_{a.features}")

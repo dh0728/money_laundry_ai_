@@ -87,11 +87,11 @@ def audit_one(name: str, con, store: L.GraphStore):
     return out
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--select"); ap.add_argument("--all", action="store_true"); ap.add_argument("--force", action="store_true")
     ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="20GB")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     names = sorted(p.name for p in (L.SAMPLING / "select").iterdir() if (p / "selected.parquet").exists()) if a.all else [a.select]
     con = L.connect(a.threads, a.memory); store = L.GraphStore(a.features, threads=a.threads, memory=a.memory); store.prepare(); store.load()
     for n in names:

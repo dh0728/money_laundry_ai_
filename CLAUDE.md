@@ -37,6 +37,7 @@ code/
   05_sampling_audit.py       ①b 선택 결과 통계 감사(학습 무관): 피처 KL/PSI/KS, 일별 보존율, 시간대 JSD, 세탁계좌 연루 비율, 양성 1홉 보존 → select/<name>/audit.json
   05_sampling_train.py       ② 실험 조건 1개 학습·평가 = select × apply(loss|struct) × reweight(ipw|none) × pi_eff × seed → sampling/runs/<run>/run.json
   05_sampling_collect.py     ③ runs/*/run.json → sampling/results/ (runs.csv, summary.csv, ratio_curves.png)
+  05_sampling_experiment.ipynb  위 4개를 셀별로 부르는 리뷰용 노트북 (설정·라벨 분포·select·audit 표/그림·train 1조건·collect)
   sampling_lib.py            05 공통: GraphStore(v10 과 같은 2홉 그래프, memmap 캐시), BinaryGNN(v10 network.py 와 같은 층), 가중 지표
                              설계 메모: 지도 샘플링(loss)=그래프 유지·loss target 만 선택, 구조 샘플링(struct)=adjacency 에서도 제거(구조-A).
                              r(정상:양성)과 pi_eff(양성 손실 비중)를 분리 — pos_weight 는 pi_eff 에서 역산. 검증은 양성 전부 + 정상 2% 가중 표본(공유)

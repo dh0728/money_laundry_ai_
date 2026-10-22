@@ -18,7 +18,9 @@ import sampling_lib as L
 def budget_per_day(lab: pd.DataFrame, ratio: float) -> pd.Series:
     """날짜별 정상 예산 = min(그날 정상 수, ceil(그날 양성 수 × ratio))."""
     g = lab.groupby("day").y.agg(pos="sum", n="size")
-    return np.minimum(g.n - g.pos, np.ceil(g.pos * ratio)).astype(int)
+    want = np.ceil(g.pos * ratio)
+    want[g.pos == 0] = np.ceil(g.pos[g.pos > 0].median() * ratio)     # 양성이 0인 날도 그날 정상을 비우지 않도록 중앙값 예산
+    return np.minimum(g.n - g.pos, want).astype(int)
 
 
 def select_random(lab, ratio, rng):
@@ -89,7 +91,7 @@ def select_cssmc(lab, ratio, rng, store_feat: np.ndarray, clusters, candidates):
     return pick
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", required=True, choices=["none", "random", "hard", "cssmc"])
     ap.add_argument("--ratio", type=float, default=None, help="정상:양성 (일별). none 이면 생략")
@@ -98,7 +100,7 @@ def main():
     ap.add_argument("--hard-frac", type=float, default=0.5)
     ap.add_argument("--clusters", type=int, default=30); ap.add_argument("--candidates", type=int, default=10)
     ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="20GB")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     assert a.method == "none" or a.ratio, "--ratio 필요"
     name = "none" if a.method == "none" else f"{a.method}_r{a.ratio:g}"
     out = L.SAMPLING / "select" / name; out.mkdir(parents=True, exist_ok=True)
