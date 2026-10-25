@@ -19,7 +19,9 @@ def main(show=True):
     rows = []
     for p in glob.glob(str(L.SAMPLING / "runs" / "*" / "run.json")):
         r = json.loads(open(p, encoding="utf-8").read()); v = r.pop("val"); s = r.pop("sampling")
-        rows.append({**r, **v, **{"keep_" + k[11:]: val for k, val in s.items()}, **audits.get(r["select"], {})})
+        t = r.pop("test", None) or {}; r.pop("features", None)
+        rows.append({**r, **v, **{"test_" + k: val for k, val in t.items()},
+                     **{"keep_" + k[11:]: val for k, val in s.items()}, **audits.get(r["select"], {})})
     df = pd.DataFrame(rows)
     if df.empty:
         print("run.json 없음"); return None, None

@@ -14,6 +14,8 @@
                    pos_weight = pi/(1-pi) × Σ(정상 가중치) / 양성 수
 
 검증: 검증 구간 양성 전부 + 정상의 --val-neg-rate 비율(일별 층화, 가중치 1/rate). 모든 조건이 같은 파일을 공유.
+그래프·노드 피처는 구간마다 따로: 학습 target 은 --train-features(학습 구간 끝까지), 검증 target 은 --val-features(검증 끝까지).
+--eval-test 를 주면 최고 에폭 모델로 테스트 구간(--test-features)을 한 번 평가해 run.json 의 test 에 기록한다 (최종 후보에만).
       (target 1건당 2홉 그래프 1개라 검증 전체 3천만 건은 조건마다 못 돌림. 가중 지표는 전체 평가의 불편추정.)
 run.json 있으면 건너뜀. 이어 돌리려면 폴더를 지운다.
 """
@@ -53,8 +55,11 @@ def main(argv=None):
     ap.add_argument("--reweight", choices=["ipw", "none"], default="none")
     ap.add_argument("--pi-eff", type=float, default=0.25)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--val", default="2022-09-28:2022-10-14"); ap.add_argument("--val-neg-rate", type=float, default=0.02)
-    ap.add_argument("--features", default="features")
+    ap.add_argument("--val", default=L.VAL); ap.add_argument("--val-neg-rate", type=float, default=0.02)
+    ap.add_argument("--test", default=L.TEST); ap.add_argument("--eval-test", action="store_true", help="최종 후보만: 학습 후 최고 에폭 모델로 테스트 구간 평가")
+    ap.add_argument("--train-features", default=L.FEAT["train"], help="학습 구간 끝까지로 계산한 02 출력 (학습 target 의 그래프·노드 피처)")
+    ap.add_argument("--val-features", default=L.FEAT["val"], help="검증 구간 끝까지 (검증 target 의 그래프·노드 피처)")
+    ap.add_argument("--test-features", default=L.FEAT["test"], help="테스트 구간 끝까지")
     ap.add_argument("--epochs", type=int, default=5); ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--batch", type=int, default=32, help="target 수. 2홉 그래프가 target 당 최대 4만 간선이라 크게 못 잡음"); ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--max-train-targets", type=int, default=None, help="에폭당 target 상한(시간 측정·스모크용)")
@@ -62,7 +67,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     import torch
     device = ("cuda" if torch.cuda.is_available() else "cpu") if a.device == "auto" else a.device
-    run_name = f"{a.select}_{a.apply}_{a.reweight}_pi{a.pi_eff:g}_s{a.seed}" + ("" if a.features == "features" else f"_{a.features}")
+    run_name = f"{a.select}_{a.apply}_{a.reweight}_pi{a.pi_eff:g}_s{a.seed}" + ("" if a.train_features == L.FEAT["train"] else f"_{a.train_features}")
     out = L.SAMPLING / "runs" / run_name
     if (out / "run.json").exists():
         L.log(f"완료된 조건: {run_name}"); return
@@ -72,6 +77,9 @@ def main(argv=None):
     # --- 학습 표본 ---------------------------------------------------------------
     sel_dir = L.SAMPLING / "select" / a.select
     sel = pd.read_parquet(sel_dir / "selected.parquet"); meta = json.loads((sel_dir / "meta.json").read_text(encoding="utf-8"))
+    # 누수 방지: 각 구간의 그래프·노드 피처는 그 구간 끝까지의 거래로 계산된 것이어야 한다
+    L.check_features(a.train_features, meta["train"]); L.check_features(a.val_features, a.val)
+    if a.eval_test: L.check_features(a.test_features, a.test)
     w = np.where(sel.y == 1, 1.0, sel.ipw.to_numpy() if a.reweight == "ipw" else 1.0)
     n_pos = int((sel.y == 1).sum()); neg_mass = float(w[sel.y == 0].sum())
     pos_weight = a.pi_eff / (1 - a.pi_eff) * neg_mass / n_pos
@@ -85,11 +93,16 @@ def main(argv=None):
         removed = lab[(lab.y == 0) & ~lab.edge_id.isin(sel.edge_id)]
         exclude = out / "excluded_edges.parquet"; removed[["edge_id"]].to_parquet(exclude, index=False)
         L.log(f"구조 샘플링: adjacency 에서 {len(removed):,}건 제거")
-    store = L.GraphStore(a.features, exclude, a.threads, a.memory); store.prepare(); store.load()
+    store = L.GraphStore(a.train_features, exclude, a.threads, a.memory); store.prepare(); store.load()          # 학습 target 용
+    vstore = L.GraphStore(a.val_features, None, a.threads, a.memory); vstore.prepare(); vstore.load()           # 검증 target 용
+    tstore = None
+    if a.eval_test:
+        tstore = L.GraphStore(a.test_features, None, a.threads, a.memory); tstore.prepare(); tstore.load()
 
     # --- 검증 표본 ---------------------------------------------------------------
     val = val_sample(con, L.parse_window(a.val), a.val_neg_rate, 0)
     assert not set(val.edge_id).intersection(sel.edge_id), "학습·검증 겹침"
+    test = val_sample(con, L.parse_window(a.test), a.val_neg_rate, 0) if a.eval_test else None
     con.close()                                   # 학습 중엔 memmap 페이지 캐시가 커지므로 DuckDB 메모리를 비워 둔다
 
     # --- 학습 ----------------------------------------------------------------------
@@ -110,7 +123,7 @@ def main(argv=None):
             opt.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0); opt.step()
             losses.append(loss.item())
             if (i // a.batch) % 200 == 0: L.log(f"  epoch {epoch+1} {i:,}/{len(order):,} loss {np.mean(losses[-200:]):.4f}")
-        score = predict(model, store, val.edge_id.to_numpy(), a.batch * 4, device)
+        score = predict(model, vstore, val.edge_id.to_numpy(), a.batch * 4, device)
         m = L.evaluate(val.y.to_numpy(), score, val.w.to_numpy(), (val.y.to_numpy() == 1) & ~val.in_pattern.to_numpy())
         history.append(dict(epoch=epoch + 1, train_loss=float(np.mean(losses)), train_sec=round(time.time() - te), **m)); L.log(f"epoch {epoch+1}: {m}")
         if m["AP"] > best:
@@ -123,9 +136,22 @@ def main(argv=None):
 
     # --- 결과 ----------------------------------------------------------------------
     bh = max(history, key=lambda h: h["AP"])
+    test_metrics = None
+    if a.eval_test:
+        model.load_state_dict(torch.load(out / "model.pt", map_location=device, weights_only=True))
+        ts = predict(model, tstore, test.edge_id.to_numpy(), a.batch * 4, device)
+        test_metrics = L.evaluate(test.y.to_numpy(), ts, test.w.to_numpy(), (test.y.to_numpy() == 1) & ~test.in_pattern.to_numpy())
+        test_metrics["threshold_from_val"] = bh["threshold"]      # 검증에서 고른 임계값 그대로 적용한 F1 은 따로 계산
+        pred = ts >= bh["threshold"]; y = test.y.to_numpy() == 1; w = test.w.to_numpy()
+        tp, fp, fn = (w * (pred & y)).sum(), (w * (pred & ~y)).sum(), (w * (~pred & y)).sum()
+        test_metrics["F1_at_val_threshold"] = float(2 * tp / max(2 * tp + fp + fn, 1e-12))
+        pd.DataFrame(dict(edge_id=test.edge_id, y=test.y, w=test.w, score=ts)).to_parquet(out / "test_scores.parquet", index=False)
+        L.log(f"테스트: {test_metrics}")
     L.json_write(out / "run.json", dict(
         run_name=run_name, select=a.select, method=meta["method"], ratio=meta["ratio"], apply=a.apply, reweight=a.reweight,
-        pi_eff=a.pi_eff, pos_weight=pos_weight, seed=a.seed, features=a.features,
+        pi_eff=a.pi_eff, pos_weight=pos_weight, seed=a.seed, train_window=meta["train"], val_window=a.val,
+        features=dict(train=a.train_features, val=a.val_features, test=(a.test_features if a.eval_test else None)),
+        test=test_metrics, test_window=(a.test if a.eval_test else None),
         train_rows=len(sel), train_pos=n_pos, train_neg=len(sel) - n_pos, neg_population=meta["neg_population"],
         sampling=dict(daily_keep_min=meta.get("daily_keep_min"), daily_keep_max=meta.get("daily_keep_max")),
         best_epoch=bh["epoch"], val={k: bh[k] for k in ("AP", "F1", "precision", "recall", "threshold", "recall_at_1pct", "unmatched_recall_at_1pct", "ECE")},
