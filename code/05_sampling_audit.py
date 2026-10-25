@@ -105,11 +105,13 @@ def audit_one(name: str, con, feat_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--select"); ap.add_argument("--all", action="store_true"); ap.add_argument("--force", action="store_true")
-    ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
+    ap.add_argument("--features", default=L.FEAT["train"]); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     names = sorted(p.name for p in (L.SAMPLING / "select").iterdir() if (p / "selected.parquet").exists()) if a.all else [a.select]
     con = L.connect(a.threads, a.memory); feat_dir = L.features_dir(a.features)
     for n in names:
+        meta = json.loads((L.SAMPLING / "select" / n / "meta.json").read_text(encoding="utf-8"))
+        L.check_features(a.features, meta["train"])
         if (L.SAMPLING / "select" / n / "audit.json").exists() and not a.force:
             L.log(f"감사 있음: {n}"); continue
         audit_one(n, con, feat_dir)
