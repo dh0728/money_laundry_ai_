@@ -157,7 +157,7 @@ class GraphStore:
         con = connect(self.threads, self.memory)
         tx = BASE / "transactions.parquet"
         n_edge = con.execute(f"SELECT max(edge_id) FROM read_parquet({q(self.feat/'edge_features.parquet')})").fetchone()[0] + 1
-        n_node = con.execute(f"SELECT count(*) FROM read_parquet({q(self.feat/'node_features.parquet')})").fetchone()[0]
+        n_node = con.execute(f"SELECT max(node_id) + 1 FROM read_parquet({q(BASE/'kyc.parquet')})").fetchone()[0]   # 전체 계좌 수 (구간 피처엔 일부만 있음)
         log(f"memmap 생성: edge {n_edge:,} × 17, node {n_node:,} × 19, 기준 시점 {self.context_end} → {self.cache}")
 
         # 엣지 피처 / 끝점 (edge_id 로 직접 인덱싱, 청크로 채움)
@@ -178,8 +178,13 @@ class GraphStore:
         # 노드 피처 (node_id = 0..N-1 로 정렬돼 있음)
         ncols = ", ".join(f'"{c}"' for c in NODE_FEATURES)
         nx = con.execute(f"SELECT node_id, {ncols} FROM read_parquet({q(self.feat/'node_features.parquet')}) ORDER BY node_id").df()
-        assert np.array_equal(nx.node_id.to_numpy(), np.arange(n_node)), "node_id 가 0..N-1 이 아님"
-        np.save(self.cache / "node_x.npy", nx[NODE_FEATURES].to_numpy(np.float32))
+        # 구간별 피처(CONTEXT_END)에는 그 날짜까지 거래가 있었던 계좌만 있다. 나머지는 0 —
+        # 그 구간엔 거래가 없으므로 adjacency·target 어디에도 나오지 않아 실제로 읽히지 않는다 (load 후 build 에서 확인)
+        ids = nx.node_id.to_numpy(np.int64); assert ids.max() < n_node and len(np.unique(ids)) == len(ids), "node_id 범위·중복 이상"
+        node_x = np.zeros((n_node, len(NODE_FEATURES)), np.float32); node_x[ids] = nx[NODE_FEATURES].to_numpy(np.float32)
+        np.save(self.cache / "node_x.npy", node_x)
+        has = np.zeros(n_node, bool); has[ids] = True; np.save(self.cache / "node_has.npy", has)
+        log(f"  노드 피처 {len(ids):,}/{n_node:,} 계좌 (그 구간에 거래 없는 {n_node - len(ids):,}개는 0)")
 
         # adjacency: v10 과 같은 규칙 (owner·방향별 hash 순 상위 NEIGHBORS)
         excl = f"ANTI JOIN (SELECT edge_id FROM read_parquet({q(self.exclude)})) x USING (edge_id)" if self.exclude else ""
@@ -192,6 +197,9 @@ class GraphStore:
             QUALIFY row_number() OVER (PARTITION BY owner, incoming ORDER BY hash(edge_id, owner, {HASH_SEED}), edge_id) <= {NEIGHBORS}
             ORDER BY owner, edge_id""").df()
         owners = adj.owner.to_numpy(np.int64)
+        ae = adj.edge_id.to_numpy(np.int64)
+        missing = int((~has[np.asarray(es[ae])]).sum() + (~has[np.asarray(ed[ae])]).sum())
+        assert missing == 0, f"adjacency 간선 끝점 중 노드 피처 없는 계좌 {missing}건 — 피처와 거래 기준 시점이 어긋남"
         ptr = np.zeros(n_node + 1, np.int64)
         np.add.at(ptr, owners + 1, 1); ptr = np.cumsum(ptr)
         np.save(self.cache / "adj_ptr.npy", ptr)
