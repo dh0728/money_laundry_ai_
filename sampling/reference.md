@@ -2,13 +2,29 @@
 
 ### 1. Realistic Synthetic Financial Transactions for Anti-Money Laundering Models (Altman et al., NeurIPS 2023)
 - AMLworld 데이터셋 원 논문
-- 데이터셋 : HI·LI × Small, Medium (GNN) / HI·LI × Large는 트리 모델(LightGBM, XGBoost)만 (보충자료)
+- 데이터셋 : 본문은 HI·LI × Small, Medium (GNN·트리 모델 모두)
+  보충자료에서 HI·LI × Large를 트리 모델(GFP+XGBoost, LightGBM)로만 추가 실험. GNN의 Large 결과는 없음
 - 분할 : 시간순 60/20/20. 검증·테스트 그래프에 이전 거래 포함
 - 방식 :
-  - GNN — 가중 손실 (minority class weight 튜닝, 탐색 범위 6~8)
-  - 트리 모델 — scale_pos_weight (탐색 범위 1~10)
+  - GNN - 가중 손실 (minority class weight 튜닝, 탐색 범위 6~8)
+  - 트리 모델 - scale_pos_weight (탐색 범위 1~10)
   - 다운샘플링·오버샘플링 없음. 샘플링은 규모 때문에 하는 이웃 샘플링뿐
 - 평가 : 소수 클래스 F1
+- 트리 모델 전처리 (보충자료)
+  - 입력 피처
+    - 기본 거래 피처 : 금액, 통화, 날짜, 시각, 결제 방식
+    - 그래프 피처 : GFP(Graph Feature Preprocessor)로 생성
+      - scatter-gather 패턴 (시간 창 6시간)
+      - temporal cycle (길이 10 이하의 단순 사이클, 시간 창 1일)
+      - 계좌(노드) 통계 : 금액·시각 기준 (시간 창 1일)
+  - 누수 방지 : 거래를 시각 순서로 처리해서, 각 거래의 그래프 피처는 과거 거래로만 계산
+    ("transactions from the training set will not contain graph-based features computed using the validation or test sets")
+  - 배치 : 그래프 피처를 128건 단위로 추출
+  - Large 다운샘플링 : 언급 없음
+  - Large 분할 : 비율·방법 미기재 (권장 분할이 있다고만 적힘)
+  - 튜닝 : successive halving으로 하이퍼파라미터 탐색. HI·LI-Large의 LightGBM은 좁은 범위(Range-small)로 탐색, 최적 설정으로 시드 4개 학습
+  - 우리 실험과의 차이 : GFP 피처는 시간 창(6시간, 1일)을 두고 과거로만 계산. 우리 노드 피처는 시간 창 없이 누적(구간 끝까지).
+    긴 구조(사이클·scatter-gather)를 피처로 미리 계산해 넣는 방식의 근거
 
 ### 2. Provably Powerful Graph Neural Networks for Directed Multigraphs (Egressy et al., AAAI 2024)
 - Multi-GNN. v10 구조(역방향 메시지 패싱, Ego ID)의 원본
@@ -47,7 +63,7 @@
 ## 정리
 | 논문 | HI-Large 사용 | 불균형 처리 | 그래프에서 거래 제거 |
 |---|---|---|---|
-| Altman 2023 | 트리 모델만 | 가중 손실 / scale_pos_weight | 없음 |
+| Altman 2023 | 트리 모델만 (보충자료) | 가중 손실 / scale_pos_weight | 없음 |
 | Egressy 2024 | 없음 | 가중 손실 | 없음 |
 | FraudGT 2024 | GNN | BCE (가중치 미기재) | 없음 |
 | BlazingAML 2026 | XGBoost | 미기재 | 없음 |
@@ -56,3 +72,10 @@
 - 대부분이 **그래프를 유지하고 손실 가중치로** 불균형을 다룸. 다운샘플링을 쓴 연구는 없음
 - HI-Large로 GNN을 학습한 건 FraudGT뿐이고, 정상 거래를 줄이지 않고 이웃 샘플링만 사용
 - 구조 샘플링 계열은 OES 하나이고, 쉬운 간선을 지우는 방식이라 우리 구조 샘플링(정상 무작위 제거)과는 목적이 다름
+
+## 출처
+- [Realistic Synthetic Financial Transactions for Anti-Money Laundering Models (arXiv)](https://arxiv.org/html/2306.16424v1) - [NeurIPS 2023 Supplemental](https://papers.neurips.cc/paper_files/paper/2023/file/5f38404edff6f3f642d6fa5892479c42-Supplemental-Datasets_and_Benchmarks.pdf)
+- [Provably Powerful Graph Neural Networks for Directed Multigraphs (arXiv)](https://arxiv.org/html/2306.11586v3) · [IBM/Multi-GNN 코드](https://github.com/IBM/Multi-GNN)
+- [FraudGT (PDF)](https://jshun.csail.mit.edu/FraudGT.pdf)
+- [BlazingAML (arXiv 2604.12241)](https://arxiv.org/pdf/2604.12241)
+- [Graph Neural Network with One-side Edge Sampling for Fraud Detection (arXiv 2601.06800)](https://arxiv.org/pdf/2601.06800)
