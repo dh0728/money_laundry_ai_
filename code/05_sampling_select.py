@@ -1,9 +1,10 @@
 """05-1. 학습에 넣을 정상 거래 선택 → select/<method>_r<ratio>/selected.parquet
 
-    python 05_sampling_select.py --method random --ratio 30 --train 2022-08-08:2022-09-27
+    python 05_sampling_select.py --method random --ratio 30             # 기본 학습 구간 sampling_lib.TRAIN
     python 05_sampling_select.py --method hard   --ratio 30 --hard-frac 0.5
     python 05_sampling_select.py --method cssmc  --ratio 30 --clusters 30 --candidates 10
     python 05_sampling_select.py --method strata --ratio 30 --axes day,amount,cross_bank   # 다축 비례 층화
+    python 05_sampling_select.py --method random --ratio 10 --budget neg   # 날짜별 예산을 정상 수 비율로 → random_r10_bneg
     python 05_sampling_select.py --method none                      # 전부 (샘플링 없음 기준선)
 
 출력 selected.parquet 컬럼
@@ -16,12 +17,20 @@ import numpy as np, pandas as pd
 import sampling_lib as L
 
 
+BUDGET = "pos"   # main 에서 --budget 으로 설정
+
+
 def budget_per_day(lab: pd.DataFrame, ratio: float) -> pd.Series:
-    """날짜별 정상 예산 = min(그날 정상 수, ceil(그날 양성 수 × ratio))."""
-    g = lab.groupby("day").y.agg(pos="sum", n="size")
+    """날짜별 정상 예산. 전체 예산은 둘 다 (학습 구간 양성 수 × ratio) 로 같고, 날짜에 나누는 규칙만 다르다.
+    pos: 그날 양성 수 × ratio — 날마다 정상:양성 = ratio:1, 정상이 많은 날(월말 Reinvestment)은 보존율이 낮아짐
+    neg: 전체 예산 × (그날 정상 수 / 전체 정상 수) — 모든 날 보존율이 같아 날짜 비중이 모집단과 같음, 날별 정상:양성은 달라짐"""
+    g = lab.groupby("day").y.agg(pos="sum", n="size"); neg = g.n - g.pos
+    if BUDGET == "neg":
+        total = np.ceil(g.pos.sum() * ratio)
+        return np.minimum(neg, np.round(total * neg / neg.sum())).astype(int)
     want = np.ceil(g.pos * ratio)
     want[g.pos == 0] = np.ceil(g.pos[g.pos > 0].median() * ratio)     # 양성이 0인 날도 그날 정상을 비우지 않도록 중앙값 예산
-    return np.minimum(g.n - g.pos, want).astype(int)
+    return np.minimum(neg, want).astype(int)
 
 
 def select_random(lab, ratio, rng):
@@ -160,21 +169,30 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", required=True, choices=["none", "random", "hard", "cssmc", "strata"])
     ap.add_argument("--ratio", type=float, default=None, help="정상:양성 (일별). none 이면 생략")
-    ap.add_argument("--train", default="2022-08-08:2022-09-27")
+    ap.add_argument("--train", default=L.TRAIN)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--budget", choices=["pos", "neg"], default="pos",
+                    help="날짜별 예산 규칙. pos=그날 양성×r (기본), neg=전체 예산을 그날 정상 수 비율로 (이름에 _bneg). cssmc 는 날짜를 안 봐서 무관")
     ap.add_argument("--hard-frac", type=float, default=0.5)
     ap.add_argument("--clusters", type=int, default=30); ap.add_argument("--candidates", type=int, default=10)
     ap.add_argument("--axes", default="day,amount,cross_bank", help="strata 축 (day,amount,recent,cross_bank,new_pair 중 콤마 구분)")
     ap.add_argument("--amount-bins", type=int, default=5)
-    ap.add_argument("--features", default="features"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
+    ap.add_argument("--features", default=L.FEAT["train"], help="학습 구간 끝까지로 계산한 02 출력 (strata·cssmc 가 엣지 피처를 읽음)")
+    ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     assert a.method == "none" or a.ratio, "--ratio 필요"
     name = "none" if a.method == "none" else f"{a.method}_r{a.ratio:g}"
     if a.method == "strata":
         name += "_" + "-".join(x.strip() for x in a.axes.split(","))
+    assert not (a.budget == "neg" and a.method in ("none", "cssmc")), "none·cssmc 는 날짜별 예산을 안 써서 --budget neg 무의미"
+    if a.budget == "neg":
+        name += "_bneg"
+    global BUDGET; BUDGET = a.budget
     out = L.SAMPLING / "select" / name; out.mkdir(parents=True, exist_ok=True)
     if (out / "selected.parquet").exists():
         L.log(f"이미 있음: {out}"); return
+    if a.method in ("strata", "cssmc"):
+        L.check_features(a.features, a.train)
     con = L.connect(a.threads, a.memory); window = L.parse_window(a.train); rng = np.random.default_rng(a.seed); t0 = time.time()
     lab = L.load_labels(con, window)
     L.log(f"학습 구간 {window}: {len(lab):,}건, 양성 {int(lab.y.sum()):,}")
@@ -192,7 +210,7 @@ def main(argv=None):
     sel = pd.concat([pos, neg]).sort_values("edge_id").reset_index(drop=True)
     sel.to_parquet(out / "selected.parquet", index=False)
     daily = sel.groupby("day").agg(pos=("y", "sum"), neg=("y", lambda s: int((s == 0).sum())))
-    L.json_write(out / "meta.json", dict(method=a.method, ratio=a.ratio, train=a.train, seed=a.seed, hard_frac=a.hard_frac,
+    L.json_write(out / "meta.json", dict(method=a.method, ratio=a.ratio, budget=a.budget, train=a.train, seed=a.seed, hard_frac=a.hard_frac,
                                          clusters=a.clusters, candidates=a.candidates, axes=(a.axes if a.method == "strata" else None), rows=len(sel), pos=int(pos.shape[0]), neg=int(neg.shape[0]),
                                          neg_population=int((lab.y == 0).sum()), ipw_sum_neg=float(neg.ipw.sum()),
                                          daily_keep_min=float((daily.neg / lab[lab.y == 0].groupby("day").size()).min()),

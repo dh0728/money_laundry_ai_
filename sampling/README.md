@@ -51,6 +51,13 @@
 - 정상 전부로 학습하면 1에폭 69시간(target당 2홉 서브그래프를 만드는 v10 구조라), 양성이 배치에 거의 안 들어와 학습 신호도 희박
 - 목표: **성능을 유지하면서 정상을 얼마나·어떻게 줄일 수 있나** + 양성 비중을 바꾸면 성능이 더 오르나
 
+#### 근거
+- AMLworld 원 논문(Altman et al., NeurIPS 2023)과 Multi-GNN(Egressy et al., AAAI 2024)은
+  - 검증·테스트 그래프에 이전 거래를 모두 포함하고 ("validation and test set transactions need access to the previous transactions")
+  - 클래스 불균형을 가중 손실(minority class weight)로 처리하며
+  - 그래프에서 거래를 제거하는 다운샘플링은 사용하지 않음. 샘플링은 규모 때문에 하는 이웃 샘플링(2홉 × 100)뿐
+
+
 ### 방식 — 지도 vs 구조
 GNN에서 "정상을 줄인다"는 두 가지가 있다. 같은 선택 목록을 두 방식에 각각 적용해 비교한다.
 

@@ -21,6 +21,14 @@ import duckdb
 
 DATASET = "HI-Large"
 NEIGHBORS = 100          # v10 Options.neighbors
+
+# 시간 분할 (월~일 주 단위, 11월 이후 미사용 — 11/6 부터 생성기 꼬리 구간)
+TRAIN = "2022-08-08:2022-10-02"   # 8주
+VAL   = "2022-10-03:2022-10-16"   # 2주  (에폭·임계값 선택)
+TEST  = "2022-10-17:2022-10-30"   # 2주  (최종 후보만 평가)
+# 구간별 그래프·노드 피처 폴더 — 02 를 TAG=train/val/test, CONTEXT_END=각 구간 끝 날짜로 돌린 출력.
+# 노드 피처와 adjacency 는 그 구간 끝까지의 거래로만 만든다 (미래 거래 누수 방지).
+FEAT = {"train": "features_train", "val": "features_val", "test": "features_test"}
 HASH_SEED = 42           # v10 adjacency hash seed
 
 NODE_FEATURES = ["log_out_count", "log_in_count", "log_out_neighbors", "log_in_neighbors", "log_self_count",
@@ -84,6 +92,19 @@ def features_dir(name: str = "features") -> Path:
     return d
 
 
+def features_context_end(name: str) -> str | None:
+    """02 가 기록한 features.json 의 context_end (그 폴더 피처가 어느 날짜까지의 거래로 계산됐나)."""
+    f = features_dir(name) / "features.json"
+    return str(json.loads(f.read_text(encoding="utf-8")).get("context_end"))[:10] if f.is_file() else None
+
+
+def check_features(name: str, window: str):
+    """피처 폴더의 기준 시점이 구간 끝과 같은지 확인. 다르면 미래 거래가 섞이거나(누수) 구간 거래가 빠진다."""
+    end = parse_window(window)[1]; ce = features_context_end(name)
+    assert ce == end, (f"{name} 의 context_end={ce} 가 구간 끝 {end} 와 다름 — "
+                       f"02 를 TAG 와 CONTEXT_END='{end}' 로 다시 돌려야 함")
+
+
 # ----------------------------------------------------------------------------- 라벨
 def load_labels(con, window: tuple[str, str], patterns=True) -> pd.DataFrame:
     """해당 기간 거래의 edge_id, day, src, dst, y(0/1), in_pattern(패턴 파일 매칭 여부)."""
@@ -119,8 +140,9 @@ class GraphStore:
                      02 를 다른 TAG 로 돌리고 features_name 을 그 폴더로 준다(구조-B).
     """
 
-    def __init__(self, features_name="features", exclude_parquet: Path | None = None, threads=8, memory="20GB"):
+    def __init__(self, features_name="features", exclude_parquet: Path | None = None, threads=8, memory="12GB"):
         self.feat = features_dir(features_name)
+        self.context_end = features_context_end(features_name)     # adjacency 도 이 날짜까지의 거래로만
         self.exclude = Path(exclude_parquet) if exclude_parquet else None
         tag = features_name + ("_" + hashlib.sha1(str(self.exclude).encode()).hexdigest()[:8] if self.exclude else "")
         self.cache = SAMPLING / "cache" / tag
@@ -134,9 +156,9 @@ class GraphStore:
             log(f"GraphStore 캐시 있음: {self.cache}"); return
         con = connect(self.threads, self.memory)
         tx = BASE / "transactions.parquet"
-        n_edge = con.execute(f"SELECT max(edge_id) FROM read_parquet({q(tx)})").fetchone()[0] + 1
-        n_node = con.execute(f"SELECT count(*) FROM read_parquet({q(self.feat/'node_features.parquet')})").fetchone()[0]
-        log(f"memmap 생성: edge {n_edge:,} × 17, node {n_node:,} × 19 → {self.cache}")
+        n_edge = con.execute(f"SELECT max(edge_id) FROM read_parquet({q(self.feat/'edge_features.parquet')})").fetchone()[0] + 1
+        n_node = con.execute(f"SELECT max(node_id) + 1 FROM read_parquet({q(BASE/'kyc.parquet')})").fetchone()[0]   # 전체 계좌 수 (구간 피처엔 일부만 있음)
+        log(f"memmap 생성: edge {n_edge:,} × 17, node {n_node:,} × 19, 기준 시점 {self.context_end} → {self.cache}")
 
         # 엣지 피처 / 끝점 (edge_id 로 직접 인덱싱, 청크로 채움)
         ex = np.lib.format.open_memmap(self.cache / "edge_x.npy", "w+", np.float32, (n_edge, 17))
@@ -156,25 +178,34 @@ class GraphStore:
         # 노드 피처 (node_id = 0..N-1 로 정렬돼 있음)
         ncols = ", ".join(f'"{c}"' for c in NODE_FEATURES)
         nx = con.execute(f"SELECT node_id, {ncols} FROM read_parquet({q(self.feat/'node_features.parquet')}) ORDER BY node_id").df()
-        assert np.array_equal(nx.node_id.to_numpy(), np.arange(n_node)), "node_id 가 0..N-1 이 아님"
-        np.save(self.cache / "node_x.npy", nx[NODE_FEATURES].to_numpy(np.float32))
+        # 구간별 피처(CONTEXT_END)에는 그 날짜까지 거래가 있었던 계좌만 있다. 나머지는 0 —
+        # 그 구간엔 거래가 없으므로 adjacency·target 어디에도 나오지 않아 실제로 읽히지 않는다 (load 후 build 에서 확인)
+        ids = nx.node_id.to_numpy(np.int64); assert ids.max() < n_node and len(np.unique(ids)) == len(ids), "node_id 범위·중복 이상"
+        node_x = np.zeros((n_node, len(NODE_FEATURES)), np.float32); node_x[ids] = nx[NODE_FEATURES].to_numpy(np.float32)
+        np.save(self.cache / "node_x.npy", node_x)
+        has = np.zeros(n_node, bool); has[ids] = True; np.save(self.cache / "node_has.npy", has)
+        log(f"  노드 피처 {len(ids):,}/{n_node:,} 계좌 (그 구간에 거래 없는 {n_node - len(ids):,}개는 0)")
 
         # adjacency: v10 과 같은 규칙 (owner·방향별 hash 순 상위 NEIGHBORS)
         excl = f"ANTI JOIN (SELECT edge_id FROM read_parquet({q(self.exclude)})) x USING (edge_id)" if self.exclude else ""
         adj = con.execute(f"""
-            WITH t AS (SELECT edge_id, src, dst FROM read_parquet({q(tx)}) {excl}),
+            WITH t AS (SELECT edge_id, src, dst FROM read_parquet({q(tx)}) {excl}
+                       {f"WHERE day <= DATE {q(self.context_end)}" if self.context_end else ""}),
                  e AS (SELECT edge_id, dst AS owner, TRUE AS incoming FROM t
                        UNION ALL SELECT edge_id, src AS owner, FALSE FROM t)
             SELECT owner, edge_id, incoming FROM e
             QUALIFY row_number() OVER (PARTITION BY owner, incoming ORDER BY hash(edge_id, owner, {HASH_SEED}), edge_id) <= {NEIGHBORS}
             ORDER BY owner, edge_id""").df()
         owners = adj.owner.to_numpy(np.int64)
+        ae = adj.edge_id.to_numpy(np.int64)
+        missing = int((~has[np.asarray(es[ae])]).sum() + (~has[np.asarray(ed[ae])]).sum())
+        assert missing == 0, f"adjacency 간선 끝점 중 노드 피처 없는 계좌 {missing}건 — 피처와 거래 기준 시점이 어긋남"
         ptr = np.zeros(n_node + 1, np.int64)
         np.add.at(ptr, owners + 1, 1); ptr = np.cumsum(ptr)
         np.save(self.cache / "adj_ptr.npy", ptr)
         np.save(self.cache / "adj_edge.npy", adj.edge_id.to_numpy(np.int32))
         np.save(self.cache / "adj_in.npy", adj.incoming.to_numpy(bool))
-        json_write(done, dict(features=str(self.feat), exclude=str(self.exclude), n_edge=n_edge, n_node=n_node,
+        json_write(done, dict(features=str(self.feat), context_end=self.context_end, exclude=str(self.exclude), n_edge=n_edge, n_node=n_node,
                               adjacency_rows=len(adj), neighbors=NEIGHBORS, hash_seed=HASH_SEED))
         con.close(); log("GraphStore 준비 끝")
 
