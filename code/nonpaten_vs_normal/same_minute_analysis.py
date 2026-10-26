@@ -1,5 +1,6 @@
 """03 notebook implementation; embedded in the notebook for standalone use."""
 from pathlib import Path
+from datetime import datetime
 import time
 import pandas as pd
 
@@ -128,6 +129,30 @@ def extend_features(con, transactions, base_features, destination):
     return dict(feature_rows=n, minute_source_rows=source_n,
                 analysis_first=str(first), analysis_last=str(last),
                 target_identity_mismatches=mismatch, invalid_feature_rows=bad)
+
+
+def select_analysis_period(con, features, start, end_exclusive):
+    """Filter target rows only; keep original historical/minute features unchanged."""
+    start_ts, end_ts = map(datetime.fromisoformat, (start, end_exclusive))
+    require(start_ts < end_ts, '분석 시작은 종료보다 빨라야 합니다.')
+    require(all(t.second == 0 and t.microsecond == 0 for t in [start_ts, end_ts]),
+            '동일 분 활동을 보존하도록 분석 경계를 분 단위로 지정하세요.')
+    require(Path(features).is_file(), f'피처 파일 없음: {features}')
+    con.execute(f"""
+        CREATE OR REPLACE VIEW extended AS
+        SELECT * FROM read_parquet({q(features)})
+        WHERE ts >= TIMESTAMP {q(start)} AND ts < TIMESTAMP {q(end_exclusive)}
+    """)
+    n, normal, nonpattern, first, last = con.execute("""
+        SELECT count(*),count(*) FILTER (WHERE class_name='normal'),
+          count(*) FILTER (WHERE class_name='nonpattern'),min(ts),max(ts)
+        FROM extended
+    """).fetchone()
+    require(n > 0 and normal > 0 and nonpattern > 0 and n == normal+nonpattern,
+            '선택한 기간에 정상과 무패턴이 모두 있어야 하며 다른 클래스는 없어야 합니다.')
+    return dict(analysis_start=start, analysis_end_exclusive=end_exclusive,
+                analysis_rows=n, normal_rows=normal, nonpattern_rows=nonpattern,
+                analysis_first=str(first), analysis_last=str(last))
 
 
 def summarize(con, output):

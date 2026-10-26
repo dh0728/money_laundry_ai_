@@ -159,11 +159,78 @@ class SameMinuteTest(unittest.TestCase):
                 if 'analysis_functions' in cell.get('metadata',{}).get('tags',[]):
                     self.assertEqual(src,Path(analysis.__file__).read_text(encoding='utf-8'))
                 src = src.replace('PROJECT_ROOT = None',f'PROJECT_ROOT = Path({str(project)!r})')
+                src = src.replace('REUSE_EXISTING_FEATURES = True','REUSE_EXISTING_FEATURES = False')
                 exec(compile(src,'notebook_cell','exec'),namespace)
-        output = ledger_dir/'nonpaten_vs_normal/pair_bins_same_minute_v1'
+        output = ledger_dir/'nonpaten_vs_normal/pair_bins_same_minute_until_1105'
         self.assertTrue((output/'analysis_summary.json').exists())
         self.assertFalse((output/'work.duckdb').exists())
         self.assertEqual(len(list(output.glob('*.png'))),3)
+
+    def test_period_boundaries_preserve_features_for_both_classes(self):
+        folder,tx,base = self.fixture('period')
+        self.extend(folder,tx,base)
+        # Deliberately retain the precomputed features; only the target date changes.
+        dates = [(3000,1000,'2022-08-07 23:59:00'),
+                 (3001,1000,'2022-11-05 23:59:00'),
+                 (3002,1001,'2022-11-05 23:59:00'),
+                 (3003,1000,'2022-11-06 00:00:00'),
+                 (3004,1001,'2022-11-06 00:00:00'),
+                 (3005,1000,'2022-11-30 23:59:00')]
+        sql = 'SELECT * FROM extended'
+        for edge_id,source_id,ts in dates:
+            sql += f" UNION ALL SELECT * REPLACE ({edge_id}::BIGINT AS edge_id, TIMESTAMP '{ts}' AS ts) FROM extended WHERE edge_id={source_id}"
+        path = folder/'all_periods.parquet'
+        self.con.execute(f'COPY ({sql}) TO {analysis.q(path)} (FORMAT PARQUET)')
+        audit = analysis.select_analysis_period(self.con,path,'2022-08-08','2022-11-06')
+        observed = self.con.execute('SELECT * FROM extended ORDER BY edge_id').df()
+        expected = self.con.execute(f'SELECT * FROM read_parquet({analysis.q(path)}) ORDER BY edge_id').df()
+        expected = expected[expected.edge_id.isin(self.target_ids+[3001,3002])].reset_index(drop=True)
+        pd.testing.assert_frame_equal(expected,observed)
+        self.assertEqual(audit['analysis_rows'],11)
+        self.assertEqual(audit['normal_rows'],6)
+        self.assertEqual(audit['nonpattern_rows'],5)
+        self.assertEqual(audit['analysis_last'],'2022-11-05 23:59:00')
+        tables = analysis.summarize(self.con,folder)
+        nov = tables['monthly_coverage'].query("month == '2022-11'")
+        self.assertEqual(set(nov.class_name),{'normal','nonpattern'})
+        self.assertTrue((nov.observed_days==1).all())
+        self.assertEqual(tables['bucket_rates'].total_n.sum(),11)
+        with self.assertRaisesRegex(ValueError,'시작'):
+            analysis.select_analysis_period(self.con,path,'2022-11-06','2022-11-06')
+
+    def test_notebook_reuses_features_without_ledger_or_recomputation(self):
+        import shutil
+        folder,tx,base = self.fixture('reuse')
+        self.extend(folder,tx,base)
+        project = folder/'project'
+        source_dir = project/'parquets/HI-Large/nonpaten_vs_normal/pair_bins_same_minute_v1'
+        source_dir.mkdir(parents=True)
+        shutil.copy2(folder/'extended.parquet',source_dir/'features.parquet')
+        original_bytes = (source_dir/'features.parquet').read_bytes()
+        metadata = dict(status='features_and_tables_complete',feature_rows=9,
+            prior_policy='02 features unchanged; strictly before target minute',
+            same_minute_policy='all labels including patterns; exclude current edge; end-of-minute only')
+        (source_dir/'analysis_summary.json').write_text(json.dumps(metadata),encoding='utf-8')
+        notebook = json.loads(Path(__file__).with_name('03_pair_bins_same_minute_analysis.ipynb').read_text(encoding='utf-8'))
+        namespace = {'__name__':'__notebook__'}
+        def fail_if_recomputed(*args,**kwargs):
+            self.fail('Reuse mode must not rebuild minute or history features')
+        with contextlib.redirect_stdout(io.StringIO()):
+            for cell in notebook['cells']:
+                if cell['cell_type']!='code':continue
+                src = ''.join(cell['source']).replace('PROJECT_ROOT = None',f'PROJECT_ROOT = Path({str(project)!r})')
+                exec(compile(src,'notebook_cell','exec'),namespace)
+                if 'analysis_functions' in cell.get('metadata',{}).get('tags',[]):
+                    namespace['extend_features'] = fail_if_recomputed
+        output = source_dir.parent/'pair_bins_same_minute_until_1105'
+        audit = json.loads((output/'analysis_summary.json').read_text(encoding='utf-8'))
+        self.assertEqual(audit['analysis_end_exclusive'],'2022-11-06')
+        self.assertTrue(audit['reused_features'])
+        self.assertEqual(audit['analysis_rows'],9)
+        self.assertFalse((output/'features.parquet').exists())
+        self.assertEqual(len(list(output.glob('*.csv'))),8)
+        self.assertEqual(len(list(output.glob('*.png'))),3)
+        self.assertEqual((source_dir/'features.parquet').read_bytes(),original_bytes)
 
 
 if __name__ == '__main__':
