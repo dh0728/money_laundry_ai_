@@ -70,29 +70,62 @@
     - 즉 정상을 지우진 않지만 학습 예산을 고정해서 1회 통과조차 안 하는 구간이 대부분 — 우리 "지도 샘플링 r 축소 + 여러 에폭"과 총 양성 노출 수 관점에선 비슷한 효과
 - HI-Large 테스트 F1 : GIN 36.3 · GIN+RMP 59.3 · GIN+Ego 53.3 · Multi-GIN 58.4 · LightGBM+그래프피처 58.0 · Multi-FraudGT 73.3
 
-### 4. BlazingAML: High-Throughput Anti-Money Laundering via Multi-Stage Graph Mining (2026, arXiv 2604.12241)
-- 데이터셋 : HI·LI × Small, Large (Medium 사용 여부 미확인)
-- 분할 : 시간순 80/20
-- 모델 : XGBoost + 그래프 마이닝 피처 (Fan, Degree, Cycle, Scatter-Gather). GNN 아님
-- 방식 : 다운샘플링·업샘플링·가중치 모두 미기재. 불균형은 평가 지표(F1)로만 언급
-- HI-Large F1 : XGB 단독 20.2 → 그래프 피처 전부 58.1, FraudGT 54.3 (비교 기준)
+### 4. BlazingAML: High-Throughput Anti-Money Laundering via Multi-Stage Graph Mining (Ye et al., 2026, arXiv 2604.12241)
+- 데이터셋 : HI·LI × Small, Medium, Large 6개 전부
+- 분할 : 시간순 80/20 (검증 분할 없음)
+- 모델 : XGBoost + 그래프 마이닝 피처 (Fan-in/out, Degree, Cycle, Scatter-Gather 참여 횟수). GNN 아님. 시간 창 사용하나 값 미기재
+- 방식 : 다운샘플링·업샘플링·scale_pos_weight 모두 미기재. 불균형은 F1 채택 이유로만 언급
+- HI-Large F1 (Table 2 피처 누적) : XGB 단독(계좌 ID 피처) 20.2 → +Fan 39.1 → +Degree 55.7 → +Cycle 57.5 → +SG 58.1
+- FraudGT 비교 (Table 4, LI-S/HI-S/LI-M/HI-M/LI-L/HI-L) : FraudGT 28.6/69.6/24.0/62.3/11.0/54.3 vs BlazingAML 18.4/46.4/21.4/51.1/17.8/58.1
+  - Large 두 개에서만 BlazingAML이 앞섬. Small·Medium은 FraudGT가 10~20p 높음
+  - FraudGT HI-Large 54.3은 FraudGT 논문 자체 수치(Multi-FraudGT 73.3)와 다름. 재실행인지 인용인지 미기재 → 직접 비교 불가
 
-### 5. Graph Neural Network with One-side Edge Sampling for Fraud Detection (2026, arXiv 2601.06800)
-- 데이터셋 : HI·LI × Small
-- 방식 : One-side Edge Sampling(OES)
-  - 학습 중 모델이 이미 높은 확신으로 맞히는 간선을 학습 그래프에서 제거 (구조 샘플링 계열)
-  - 검증·테스트는 전체 그래프
-- 결과 : HI-Small GIN+EU F1 50.96 → 59.47. 다른 백본은 개선이 미미 (표준편차 범위 안)
-- 참고 : 논문 안에서 "샘플링한다/제거한다" 서술이 섞여 있고, 개선 폭이 일관되지 않음
+### 5. Graph Neural Network with One-side Edge Sampling for Fraud Detection (Trieu, 2025~, arXiv 2601.06800)
+- 단독 저자·소속·날짜 미기재. 근거로 쓰기엔 신뢰도 낮음 (아래 불일치 참고)
+- 데이터셋 : HI·LI × Small. 분할·그래프 구성은 Multi-GNN과 동일 (검증·테스트는 이전 거래 포함, OES는 학습에만)
+- 방식 : One-side Edge Sampling(OES) — 구조 샘플링 계열
+  - 매 에폭, 확신도(max 클래스 확률) 상위 p=99 퍼센타일이면서 정답인 간선 E′를 뽑아 비율 r=10으로 샘플링 → 이 그래프가 학습 그래프를 **통째로 대체** (메시지 패싱 그래프 자체가 줄어듦)
+  - 에폭 n=20까지만 적용
+  - 불일치 : 동기는 "쉬운 간선 제거"인데 알고리즘은 쉬운 간선을 남기는 것으로 읽힘. 제거 비율 공식 (1−p)·r 도 값이 안 맞음
+- 불균형 처리 : 없음 (가중 손실·비율 조정 모두 없음)
+- 결과 (5시드 평균 F1) : HI-Small GIN+EU 50.96±6.95 → 59.47±4.47 만 유의미. GIN 33.4→37.4, GIN+Ego 35.3→35.4, LI-Small 3개 모두 표준편차 안
+- 학습 시간 : 8~18% 단축 (RTX A4000 1장)
+- 우리와의 관계 : "학습 그래프에서 간선을 지워도 일부 백본은 성능 유지"라는 약한 데이터 포인트. 정상 무작위 제거인 우리 구조 샘플링과는 선택 기준이 다름
 
-### 6. Graph Feature Preprocessor: Real-time Subgraph-based Feature Extraction for Financial Crime Detection (Blanuša et al., 2024, arXiv 2402.08593)
+### 6. Graph Feature Preprocessor: Real-time Subgraph-based Feature Extraction for Financial Crime Detection (Blanuša et al., ICAIF 2024, arXiv 2402.08593)
 - IBM GFP 논문. Altman 2023 보충자료의 트리 모델 전처리를 별도 논문으로 낸 것
-- 데이터셋 : AML HI·LI × Small, Medium, Large + ETH Phishing. 결과표에 "AML Large" 열이 있음 (HI/LI 구분은 표에서 미확인)
-- 분할 : 시간순 60/20/20
-- 방식 :
-  - 트리 모델(LightGBM, XGBoost)의 scale_pos_weight 탐색 범위 1~10. 선택값 미기재
-  - 다운샘플링·오버샘플링 없음
-- 참고 : Large 규모에서도 정상을 줄이지 않고 scale_pos_weight만으로 처리. 단 트리 모델이라 GNN처럼 1에폭 비용 문제가 없음
+- 그래프를 모델에 넣지 않고, 거래 스트림을 흘려보내며 거래마다 그래프 피처를 계산해 표로 만든 뒤 트리 모델에 넣는 방식
+- 데이터셋 : AML HI/LI x Small, Medium, Large 6개 전부 (HI-Large 2.1M 계좌 / 180M 거래 / 세탁 0.124% / 97일) + ETH Phishing (실제 이더리움 피싱 데이터, 우리와 무관)
+- 방식
+  - 스트리밍 : 거래를 시각순 배치(128 또는 2048건)로 넣고, 현재 시각 기준 과거 일정 시간 안의 간선만 메모리에 유지. AML은 scatter-gather 6시간, 나머지 1일 (6시간만 짧은 이유는 미기재, "처리량과 정확도의 트레이드오프"라고만)
+  - 누수 방지 : 학습 구간 거래만으로 학습 피처를 계산한 뒤 검증 구간을 이어서 처리 ("computed on the graph created using only those transactions")
+  - 라벨은 데이터에 있는 Is Laundering 0/1 하나. 이진 분류. 패턴 유형 라벨은 안 씀
+  - 분할 : 시간순 60/20/20. LightGBM 3.1.1 / XGBoost 1.7.5, successive halving으로 튜닝 (Large는 초기 조합 16개), early stopping 20, 검증으로 선택, 테스트 1회, 5회 평균
+  - 불균형 : scale_pos_weight 탐색 범위 1~10. 선택값과 임계값 미기재. 다운샘플링, 오버샘플링 없음
+- 피처가 들어가는 형태 : 거래 한 건 = 표의 한 줄이고, 그 줄 오른쪽에 숫자 열이 4묶음 붙는다. 전부 라벨을 안 보고 정상 거래까지 포함해서 센 값이다 (라벨을 보고 세면 추론 때 같은 피처를 만들 수 없고 누수가 된다). 열 이름은 논문에 없고 아래는 설명용으로 지은 이름
+  - 예시 거래 : A -> E, 5,000 USD
+  1. fan-in / fan-out : 계좌 단위로 세서 거래 행에 복사. A가 (1일 안에) 몇 곳에 보냈나 / 몇 곳에서 받았나, E도 마찬가지. 숫자 2개씩
+     `A_fan_out=3  A_fan_in=1  E_fan_out=0  E_fan_in=4`
+  2. scatter-gather : 이 거래가 "A -> 여러 곳 -> E" 모양에 속하는지. 중간 계좌 수별로 칸을 나눠 셈 (bin)
+     `sg_중간2개=1  sg_중간3개=0  sg_중간4개이상=0`
+     - gather-scatter(여러 곳 -> A -> 여러 곳)는 별도 피처 없음. A의 fan-in, fan-out이 둘 다 2 이상이면 그걸로 잡힌다고 봄
+  3. 사이클 : 이 거래가 길이 2~10짜리 고리에 몇 번 속하는지, 길이별 bin. 단순 사이클(순서 무관)과 시간순 사이클(돈이 순서대로 돈) 두 종류
+     `cycle_len2=0  cycle_len3=1  cycle_len4=0 ...  temporal_cycle_len3=1 ...`
+  4. 계좌 통계 : 출발 계좌 A와 도착 계좌 E 각각. 1일 안에 그 계좌가 받은/보낸 금액의 합, 평균, 분산, 왜도, 첨도. 시각에 대해서도 같은 통계. A 통계와 E 통계가 같은 행에 나란히 들어감
+     `A_sent_sum=12000  A_sent_mean=4000  A_sent_var=...  E_received_sum=20000 ...`
+  - 계좌 ID 제외 : A, E가 누구인지(계좌 번호)는 피처에서 뺌. BlazingAML은 반대로 ID만 넣은 걸 기준선으로 삼음
+  - 1, 4번은 계좌(노드) 단위로 계산해 거래 행에 복사한 것이고 2, 3번은 거래(엣지) 단위 계산. 단 1, 4번도 "그 거래 시각 기준 1일 창"이라 같은 계좌라도 거래마다 값이 달라짐 (우리 노드 피처는 구간 누적값 하나)
+  - "Degree" 피처는 GFP에 없음 (BlazingAML 표의 Degree 열이 뭘 가리키는지 불명)
+- 결과 (소수 클래스 F1, Table 4)
+  - HI-Large : LightGBM basic 24.5 -> GFP+LightGBM 58.0 (batch 128) / XGBoost basic 10.6 -> GFP+XGBoost 56.9 (batch 2048). GNN은 Large 결과 NA
+  - HI-Small : GFP+XGBoost 64.8 vs PNA 56.8 / GIN+EU 47.7 (GNN 수치는 Altman 2023 인용)
+- 피처 ablation (Table 5, HI-Small XGB) : basic 19.8 -> +fan 59.7 -> +사이클/SG 61.0 -> +계좌 통계 64.8. 본문 표현은 fan "more than 30%", 다중홉 "up to 4%"
+- SHAP 상위 2개 (HI-Small) : 2홉 시간순 사이클 수, 도착 계좌의 받은 금액 합
+- 참고 : 시간 창(6시간, 1일)은 처리량과의 타협으로 정한 값. 창 크기가 탐지에 미치는 영향, 세탁 패턴 중 창 안에 드는 비율은 논문에 없음 -> 우리가 모티프 피처를 넣을 땐 패턴 시간 폭을 재서 창을 정해야 함
+- 우리와의 관계
+  - fan-in/out이 효과의 대부분이고 사이클/SG는 +1~4p -> 모티프 피처 우선순위 낮음 (BlazingAML의 +2.4p와 일치)
+  - 계좌 통계 +4~8p는 우리 노드 피처(mean_paid_currency_z, paid_outlier_fraction 등)와 같은 계열. 단 GFP는 1일 창, 우리는 구간 누적
+  - 학습 구간 피처 분리는 우리 features_train/val/test와 같은 논리
 
 ### 7. MEGA: Message Passing Neural Networks for Multigraphs with EdGe Attributes (2024, arXiv 2412.00241)
 - IBM 쪽 Multi-GNN 후속
