@@ -5,7 +5,7 @@
 
 | 노트북 | 피처 | 비고 |
 |---|---|---|
-| `01_basic_features_baseline.ipynb` | 기본 4개 (Timestamp, Amount Received, Received Currency, Payment Format) | LightGBM / XGBoost / GINe / GINe+EU |
+| `01_basic_features_baseline.ipynb` | 기본 4개 (Timestamp, Amount Received, Received Currency, Payment Format). GNN 은 + port numbering 2개 | LightGBM / XGBoost (기본 4) / GINe / GINe+EU (6) |
 | 02 (예정) | + v10 엣지 피처 17개 | |
 | 03 (예정) | + v10 노드 피처 19개 | |
 | 04 (예정) | + 시간 창 fan, 계좌 금액 통계 (GFP 식) | |
@@ -13,10 +13,11 @@
 
 ## 공통 설정
 - 분할: 학습 2022-08-08~10-02 / 검증 ~10-16 / 테스트 ~10-30 (`sampling_lib.TRAIN/VAL/TEST`)
-- 그래프: 구간 끝까지의 거래 전부 (검증·테스트 그래프는 이전 거래 포함, Multi-GNN 규칙). 역방향 간선 + is_reverse 플래그
-- GNN 학습: `LinkNeighborLoader` 로 target 2048개가 서브그래프 공유, 이웃 2홉 × 50, 가중 CE [1, 6.27], 에폭 = 배치 256개 (FraudGT 식)
+- 그래프: 구간 끝까지의 거래 전부 (검증·테스트 그래프는 이전 거래 포함, Multi-GNN 규칙). `to` / `rev_to` hetero (역방향 MP), ego ID
+- GNN 학습: `LinkNeighborLoader` 로 target 2048개가 서브그래프 공유, 이웃 2홉 × 방향별 100, 가중 CE [1, 6.27], 에폭 = 배치 256개 × 400 (약 2바퀴), 검증 4 에폭마다
 - 불균형: 가중 손실 / scale_pos_weight 만. 다운샘플링 없음
-- 검증·테스트 표본: `parquets/<DATASET>/sampling/val/*.parquet` (양성 전부 + 정상 2%, 05 와 공유)
+- 검증 표본: `parquets/<DATASET>/sampling/val/*.parquet` (양성 전부 + 정상 2%, 05 와 공유). 테스트는 구간 전체
+- 메모리 (한도 약 25GB): 그래프를 도착 노드순 정렬 + `is_sorted=True`, float16/uint8, 그래프는 한 번에 하나만 (`use_graph`). 노트북 4절 설명 참고
 - 결과: `results/<DATASET>/<실험명>/` (results.json, compare.csv, *_history.csv, curves.png)
 
 ## 처음 돌릴 때
