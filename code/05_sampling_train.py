@@ -87,7 +87,7 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=5); ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--batch", type=int, default=32, help="target 수. 2홉 그래프가 target 당 최대 4만 간선이라 크게 못 잡음"); ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--max-train-targets", type=int, default=None, help="에폭당 target 상한(시간 측정·스모크용)")
-    ap.add_argument("--workers", type=int, default=8, help="서브그래프 조립 워커 수 (0 = 메인 프로세스에서 직렬 조립). 결과는 같고 속도만 다름")
+    ap.add_argument("--workers", type=int, default=4, help="서브그래프 조립 워커 수 (0 = 메인 프로세스에서 직렬 조립). 결과는 같고 속도만 다름. GPU 서버 cgroup CPU 4코어 → 3~4 가 최적 (2026-10-27 측정)")
     ap.add_argument("--device", default="auto"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     import torch
