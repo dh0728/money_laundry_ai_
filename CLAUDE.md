@@ -42,6 +42,8 @@ code/
   sampling_lib.py            05 공통: GraphStore(v10 과 같은 2홉 그래프, memmap 캐시), BinaryGNN(v10 network.py 와 같은 층), 가중 지표
                              설계 메모: 지도 샘플링(loss)=그래프 유지·loss target 만 선택, 구조 샘플링(struct)=adjacency 에서도 제거(구조-A).
                              r(정상:양성)과 pi_eff(양성 손실 비중)를 분리 — pos_weight 는 pi_eff 에서 역산. 검증은 양성 전부 + 정상 2% 가중 표본(공유)
+  binary_classification/     선행 연구(Multi-GNN·FraudGT·GFP) 방식 재현 → 피처 단계 추가 실험. 01 = 기본 피처 4개로 LightGBM/XGBoost/GINe/GINe+EU
+                             (LinkNeighborLoader 공유 서브그래프, 가중 CE, FraudGT 식 에폭). 분할·검증 표본·지표는 05 와 공유. README 참고
   0N_*.ipynb                 그 외 실험 (01·02 출력을 읽는다)
 ```
 
