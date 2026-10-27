@@ -39,12 +39,36 @@ def val_sample(con, window, rate, seed) -> pd.DataFrame:
     return v
 
 
-def predict(model, store, edge_ids, batch, device):
+class _Batches:
+    """chunks[k] 의 target 들을 store.collate 한 배치 (DataLoader 워커에서 실행)."""
+    def __init__(self, store, chunks): self.store, self.chunks = store, chunks
+    def __len__(self): return len(self.chunks)
+    def __getitem__(self, k): return self.store.collate(self.chunks[k], "cpu")
+
+
+def _worker_init(_):
+    import torch
+    torch.set_num_threads(1)
+
+
+def batch_loader(store, edge_ids, batch, workers):
+    """edge_ids 를 앞에서부터 batch 개씩 잘라 collate 한 배치를 순서대로 낸다.
+    workers > 0 이면 DataLoader 워커(fork, memmap 공유)가 조립 — 배치 내용·순서는 직렬과 같다."""
+    import torch
+    chunks = [edge_ids[i:i + batch] for i in range(0, len(edge_ids), batch)]
+    if workers <= 0:
+        return (store.collate(c, "cpu") for c in chunks)
+    return iter(torch.utils.data.DataLoader(_Batches(store, chunks), batch_size=None, shuffle=False,
+                                            num_workers=workers, prefetch_factor=4, pin_memory=True,
+                                            worker_init_fn=_worker_init, multiprocessing_context="fork"))
+
+
+def predict(model, store, edge_ids, batch, device, workers=0):
     import torch
     model.eval(); out = []
     with torch.no_grad():
-        for i in range(0, len(edge_ids), batch):
-            out.append(model.scores(*store.collate(edge_ids[i:i + batch], device)).cpu().numpy())
+        for b in batch_loader(store, edge_ids, batch, workers):
+            out.append(model.scores(*[x.to(device, non_blocking=True) for x in b]).cpu().numpy())
     return np.concatenate(out)
 
 
@@ -63,6 +87,7 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=5); ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--batch", type=int, default=32, help="target 수. 2홉 그래프가 target 당 최대 4만 간선이라 크게 못 잡음"); ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--max-train-targets", type=int, default=None, help="에폭당 target 상한(시간 측정·스모크용)")
+    ap.add_argument("--workers", type=int, default=8, help="서브그래프 조립 워커 수 (0 = 메인 프로세스에서 직렬 조립). 결과는 같고 속도만 다름")
     ap.add_argument("--device", default="auto"); ap.add_argument("--threads", type=int, default=8); ap.add_argument("--memory", default="12GB")
     a = ap.parse_args(argv)
     import torch
@@ -114,16 +139,17 @@ def main(argv=None):
         model.train(); order = np.random.default_rng(a.seed + epoch).permutation(len(ids))
         if a.max_train_targets: order = order[:a.max_train_targets]
         te = time.time(); losses = []
-        for i in range(0, len(order), a.batch):
-            j = order[i:i + a.batch]
-            logits = model(*store.collate(ids[j], device))
+        idx = [order[i:i + a.batch] for i in range(0, len(order), a.batch)]
+        for k, (j, b) in enumerate(zip(idx, batch_loader(store, ids[order], a.batch, a.workers))):
+            i = k * a.batch
+            logits = model(*[x.to(device, non_blocking=True) for x in b])
             loss = torch.nn.functional.binary_cross_entropy_with_logits(
                 logits, torch.as_tensor(ys[j], device=device), pos_weight=pw, reduction="none")
             loss = (loss * torch.as_tensor(ws[j], device=device)).sum() / ws[j].sum()
             opt.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0); opt.step()
             losses.append(loss.item())
             if (i // a.batch) % 200 == 0: L.log(f"  epoch {epoch+1} {i:,}/{len(order):,} loss {np.mean(losses[-200:]):.4f}")
-        score = predict(model, vstore, val.edge_id.to_numpy(), a.batch * 4, device)
+        score = predict(model, vstore, val.edge_id.to_numpy(), a.batch * 4, device, a.workers)
         m = L.evaluate(val.y.to_numpy(), score, val.w.to_numpy(), (val.y.to_numpy() == 1) & ~val.in_pattern.to_numpy())
         history.append(dict(epoch=epoch + 1, train_loss=float(np.mean(losses)), train_sec=round(time.time() - te), **m)); L.log(f"epoch {epoch+1}: {m}")
         if m["AP"] > best:
@@ -139,7 +165,7 @@ def main(argv=None):
     test_metrics = None
     if a.eval_test:
         model.load_state_dict(torch.load(out / "model.pt", map_location=device, weights_only=True))
-        ts = predict(model, tstore, test.edge_id.to_numpy(), a.batch * 4, device)
+        ts = predict(model, tstore, test.edge_id.to_numpy(), a.batch * 4, device, a.workers)
         test_metrics = L.evaluate(test.y.to_numpy(), ts, test.w.to_numpy(), (test.y.to_numpy() == 1) & ~test.in_pattern.to_numpy())
         test_metrics["threshold_from_val"] = bh["threshold"]      # 검증에서 고른 임계값 그대로 적용한 F1 은 따로 계산
         pred = ts >= bh["threshold"]; y = test.y.to_numpy() == 1; w = test.w.to_numpy()

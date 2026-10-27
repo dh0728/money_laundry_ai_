@@ -164,6 +164,28 @@
 - IBM 계열(Altman·Egressy·GFP·MEGA)은 일관되게 "그래프 유지 + 손실 가중치(GNN 6~8, 트리 1~10)" 방식
 - 미확인 후보 : "Synthetic Graph Data Generation to Mitigate Class Imbalance in Money Laundering Detection" (ResearchGate 399720414, 본문·데이터셋 미확인), GraphSAGE+ (Ghahremani & Nguyen, ICCPR 2025, 패턴 기반 오버샘플링, 유료라 미확인)
 
+## [추가] 샘플링에서도 union 방식으로 해야 하는거 아닌가 
+### 방식1 논문에 방식
+FraudGT는 Multi-GNN 계열 구현을 따라. PyG `LinkNeighborLoader` 방식이고, 배치의 seed 거래 전체의 끝점을 한꺼번에 이웃 샘플링해서 서브그래프를 하나로 합쳐(union) 만들기 때문에. 여러 target이 같은 노드·간선을 공유하면 한 번만 들어간다.
+
+### 방식2 현재 우리 방식
+현재 우리는 `GraphSnapshot`과 같은 방식으로 target마다 2홉 서브그래프를 따로 만들고, 서로 연결되지 않은 그래프 32개를 이어 붙여. 겹치는 이웃이 있으면 그만큼 중복으로 들어간다.
+
+정확도 측면에서 두개의 비교 근거는 없지만 속도면에서는 논문에서의 방법이 더 빠르다. 그래서 union 방식을 사용하면 되는거 아닌가 하는데 union + 다운샘플링 방식을 했을 때 문제가 생길 수 있는데
+
+자금세탁 거래는 fan-in/fan-out이나 cycle처럼 계좌를 공유하니까, 같은 배치의 양성 target끼리 이웃이 겹칠 가능성이 높다. 그러면 모델이 **"내 주변에 다른 ego 노드(= 다른 target)가 있다" → 양성일 확률이 높다"** 라는 걸 배울 수 있다. 
+이건 "어떤 거래가 target으로 뽑혔는가"라는 정보인데. 이 정보는 라벨에 따라 정해지니까, 결국 라벨이 입력으로 새는 셈이고 추론할 때는 이 신호가 없어지기 때문에
+
+배치당 양성 비율이 클루록 양성 target근처에 다른 양성이 같이 들어올 일이 자주 생겨서 이런 양상이 더욱 커질 듯
+
+일단 코드를 돌려본 결과
+① 간선 중복 비율 (union 이 줄여줄 몫): 0.1293   (배치당 간선 93,033 → union 81,008)
+② 다른 양성과 같은 배치인 양성 294건 중, 그 양성이 2홉 안에 있는 비율: 0.0000
+소요 6초  (3,200 target)
+
+누수는 일어날 일이 없긴하다 현재 데이터셋에서는 나중에 한번 해볼만 할듯
+
+
 ## 출처
 - [Realistic Synthetic Financial Transactions for Anti-Money Laundering Models (arXiv)](https://arxiv.org/html/2306.16424v1) - [NeurIPS 2023 Supplemental](https://papers.neurips.cc/paper_files/paper/2023/file/5f38404edff6f3f642d6fa5892479c42-Supplemental-Datasets_and_Benchmarks.pdf)
 - [Provably Powerful Graph Neural Networks for Directed Multigraphs (arXiv)](https://arxiv.org/html/2306.11586v3) · [IBM/Multi-GNN 코드](https://github.com/IBM/Multi-GNN)
