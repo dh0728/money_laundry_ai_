@@ -219,11 +219,17 @@ class GraphStore:
         self.ptr = np.load(c / "adj_ptr.npy")
         self.adj_edge = np.load(c / "adj_edge.npy", mmap_mode="r")
         self.adj_in = np.load(c / "adj_in.npy", mmap_mode="r")
+        self.n_edge, self.n_node = len(self.edge_src), len(self.node_x)    # collate 의 (target, id) 합성 키 단위
         return self
+
+    def _rows(self, owners: np.ndarray):
+        """owner 배열 → 각 owner 의 adjacency 행 번호를 owner 순서대로 이어 붙인 것, owner 별 행 수 (파이썬 루프 없는 ragged arange)"""
+        a = self.ptr[owners]; n = self.ptr[owners + 1] - a
+        return np.repeat(a - (np.cumsum(n) - n), n) + np.arange(n.sum(), dtype=np.int64), n
 
     def _select(self, nodes: np.ndarray):
         """owner 집합의 adjacency 행 → (edge_ids, incoming, outgoing)  (v10 _select 와 같음)"""
-        rows = np.concatenate([np.arange(self.ptr[n], self.ptr[n + 1]) for n in np.unique(nodes)] or [np.zeros(0, np.int64)])
+        rows, _ = self._rows(np.unique(np.asarray(nodes, np.int64)))
         e = np.asarray(self.adj_edge[rows], np.int64); inc = np.asarray(self.adj_in[rows])
         edge_ids, inv = np.unique(e, return_inverse=True)
         incoming = np.zeros(len(edge_ids), bool); outgoing = np.zeros(len(edge_ids), bool)
@@ -252,8 +258,46 @@ class GraphStore:
             target_attr=np.asarray(self.edge_x[edge_id], np.float32),           # [17]
             incoming=incoming, outgoing=outgoing)
 
+    def _select_batch(self, t: np.ndarray, n: np.ndarray):
+        """(target 번호 t, owner n) 쌍들(중복 없음) → target 별 _select 결과를 이어 붙인 것.
+        반환 (t_e, e, incoming, outgoing) 은 (t, edge_id) 순 정렬 = target 순서대로 _select 출력을 이은 것과 같다."""
+        rows, cnt = self._rows(n)
+        e = np.asarray(self.adj_edge[rows], np.int64); inc = np.asarray(self.adj_in[rows], bool)
+        key, inv = np.unique(np.repeat(t, cnt) * self.n_edge + e, return_inverse=True)
+        incoming = np.zeros(len(key), bool); outgoing = np.zeros(len(key), bool)
+        incoming[inv[inc]] = True; outgoing[inv[~inc]] = True
+        return key // self.n_edge, key % self.n_edge, incoming, outgoing
+
     def collate(self, edge_ids, device="cpu"):
-        """여러 target 서브그래프를 하나의 분리 그래프로 합쳐 BinaryGNN 입력 텐서로."""
+        """여러 target 서브그래프를 하나의 분리 그래프로 합쳐 BinaryGNN 입력 텐서로 (배치 단위 벡터화).
+        target 마다 build 한 뒤 이어 붙이는 collate_ref 와 출력이 같다 — 노드·간선을 (target 번호, id) 합성 키로
+        한꺼번에 정렬·중복 제거하므로 target 끼리는 섞이지 않고, target 안의 순서도 build 의 np.unique 순서와 같다."""
+        import torch
+        NE, NN = self.n_edge, self.n_node
+        tgt = np.asarray(edge_ids, np.int64); tb = np.arange(len(tgt), dtype=np.int64)
+        src = np.asarray(self.edge_src[tgt], np.int64); dst = np.asarray(self.edge_dst[tgt], np.int64)
+        rk = np.unique(np.r_[tb * NN + src, tb * NN + dst])                                   # target 별 roots
+        t1, e1, in1, out1 = self._select_batch(rk // NN, rk % NN)                             # 1홉 간선
+        s1, d1 = np.asarray(self.edge_src[e1], np.int64), np.asarray(self.edge_dst[e1], np.int64)
+        nk = np.unique(np.r_[t1[in1] * NN + s1[in1], t1[out1] * NN + d1[out1]])              # target 별 1홉 이웃
+        t2, e2, in2, out2 = self._select_batch(nk // NN, nk % NN)                             # 2홉 간선
+        ak, inv = np.unique(np.r_[t1 * NE + e1, t2 * NE + e2], return_inverse=True)
+        incoming = np.zeros(len(ak), bool); outgoing = np.zeros(len(ak), bool)
+        incoming[inv[np.r_[in1, in2]]] = True; outgoing[inv[np.r_[out1, out2]]] = True
+        ta, ea = ak // NE, ak % NE
+        s, d = np.asarray(self.edge_src[ea], np.int64), np.asarray(self.edge_dst[ea], np.int64)
+        vk = np.unique(np.r_[rk, ta * NN + s, ta * NN + d])                                   # target 별 노드 (target 순 → node_id 순)
+        ego = np.isin(vk, rk).astype(np.float32)
+        t = lambda a, dt: torch.as_tensor(np.ascontiguousarray(a), dtype=dt, device=device)
+        return (t(np.column_stack([self.node_x[vk % NN], ego]), torch.float32),
+                t(np.stack([np.searchsorted(vk, ta * NN + s), np.searchsorted(vk, ta * NN + d)]), torch.long),
+                t(np.asarray(self.edge_x[ea], np.float32), torch.float32),
+                t(np.stack([np.searchsorted(vk, tb * NN + src), np.searchsorted(vk, tb * NN + dst)]), torch.long),
+                t(np.asarray(self.edge_x[tgt], np.float32), torch.float32),
+                t(incoming, torch.bool), t(outgoing, torch.bool))
+
+    def collate_ref(self, edge_ids, device="cpu"):
+        """기준 구현: target 마다 build 해서 이어 붙인다 (collate 검증용, 느림)."""
         import torch
         xs, eis, eas, tis, tas, ins, outs, off = [], [], [], [], [], [], [], 0
         for e in edge_ids:
