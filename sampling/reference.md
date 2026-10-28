@@ -127,6 +127,10 @@
   - 계좌 통계 +4~8p는 우리 노드 피처(mean_paid_currency_z, paid_outlier_fraction 등)와 같은 계열. 단 GFP는 1일 창, 우리는 구간 누적
   - 학습 구간 피처 분리는 우리 features_train/val/test와 같은 논리
 
+### 7. SALT-GNN: Handling Dense Neighborhoods in Anti-Money Laundering Graphs via Statistics-Aware Attention
+
+
+
 ### 7. MEGA: Message Passing Neural Networks for Multigraphs with EdGe Attributes (2024, arXiv 2412.00241)
 - IBM 쪽 Multi-GNN 후속
 - 데이터셋 : HI·LI × Small, Medium (Large 미사용)
