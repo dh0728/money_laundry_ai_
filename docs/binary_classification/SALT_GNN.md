@@ -290,6 +290,7 @@ $$
   - 다만 파라미터 수와 실행 시간은 별개야. Appendix K에서 에폭 시간은 SALT 140초 ≈ PNA 135초로, 파라미터가 1/4인데 시간은 FraudGT(242초)의 60% 정도. 통계 채널이 mean·std·min·max를 전부 계산해야 해서 작은 모델치곤 가벼운 편은 아니다.
 
 ![그림 2 - SALT-GNN 아키텍처](img/fig2_architecture.png)
+
 그림 2 - SALT-GNN architecture:
 
 - `Input`: 계좌 v와 v로 들어오는 거래들(이웃 그래프). 여기서 $h_v^{(k-1)}$과 메시지 집합이 나옴
@@ -343,16 +344,19 @@ $$
 ## 5 Result
 
 ![표 2 - HI-Small 수신 계좌 degree 구간별 F1](img/table2_hi_small.png)
+
 표 2: HI-Small, 수신 계좌 degree 구간별 F1 (평균 ± 표준편차, 시드 5개). 굵게 / 밑줄: 1위 / 2위.
 *: PNAGMDA 대비 유의한 향상 (p < 0.05, Holm 보정 순열검정).
 FraudGT 와의 차이는 F1 에서는 유의하지 않으나, SALT-Trans 는 전체 PR-AUC 에서 유의하게 앞선다 (부록 E).
 
 ![표 3 - HI-Medium 수신 계좌 degree 구간별 F1](img/table3_hi_medium.png)
+
 표 3: HI-Medium, 수신 계좌 degree 구간별 F1 (평균 ± 표준편차, 시드 3개). 굵게 / 밑줄: 1위 / 2위.
 * / †: 가장 강한 기준 모델인 TransConv-84k 대비 SALT 의 향상이 Holm 보정 후 p < 0.05 / p < 0.10 (Welch t-검정, n=3; 부록 E).
 PNAGMDA 와의 차이는 이 데이터셋에서는 보정 후 유의 수준에 이르지 못함 (부록 E).
 
 ![표 4 - AMLSim 노드 분류 F1](img/table4_amlsim.png)
+
 표 4: AMLSim-32k-5% 노드 분류 F1 요약표 (평균 ± 표준편차, 시드 5개 × 분할 3개). 희소 구간 1개, 고차수 꼬리 구간 2개, 전체 점수만 보고하며,
 degree 구간 전체 표(평균 ± 표준편차)는 부록 C.
 * / †: 극단 구간에서 가장 강한 attention 기준 모델인 GAT 대비 SALT 의 향상이 Holm 보정 후 p < 0.05 / p < 0.10 (정확 쌍체 순열검정, n=15).
@@ -369,6 +373,7 @@ degree 구간 전체 표(평균 ± 표준편차)는 부록 C.
 
 
 ![표 5 - HI-Small deg[50-99] Hit@20](img/table5_hit20.png)
+
 표 5: HI-Small deg[50–99] 구간의 Hit@20 (평균 ± 표준편차, 시드 5개): 세탁 이웃이 하나 이상 있는 노드 중,
 attention 가중치 상위 20개 안에 세탁 이웃이 포함된 노드의 비율을 1홉(L0)과 2홉(L1)에서 측정.
 k=20 으로 둔 이유는 deg[50–99] 구간에서 TransConv 의 유효 이웃 수가 두 홉 모두 20 근처이기 때문 (ENNs ≈ L0 20.7, L1 17.0; 부록 D).
@@ -397,6 +402,7 @@ k=20 으로 둔 이유는 deg[50–99] 구간에서 TransConv 의 유효 이웃 
 - C3(attention 감쇠)는 직접 뺄 수가 없으니 attention을 고정해 두고 통계 채널을 켜고 끄는 것으로 분리: 끄면 attention이 완화되지 않은 상태, 켜면 완화된 상태. 양 끝 기준으로 PNA(attention 없음)와 TransConv(완화 안 된 attention)를 둠
 
 ![표 6 - HI-Small 특성별 제거 실험](img/table6_ablation.png)
+
 표 6: HI-Small 특성별 제거 실험 (F1, 평균 ± 표준편차, 시드 5개). ✓ / ∘ / × = 전부 있음 / 일부 / 없음.
 C1 (다중 집계): ∘ = 집계기 2개(mean+std), × = mean 만.
 C2 (degree 인식 인코딩): × = 없음.
