@@ -245,7 +245,9 @@ def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, 
 # ============================================================================ 4. 그래프
 class GraphStore:
     """그래프 재료(SRC, DST, Y, FEAT16)를 들고 학습·검증·테스트 그래프를 **한 번에 하나만** 올린다 (01 의 use_graph).
-    FEAT16 열 순서: 기본 4 + in_port + out_port + (단계별 추가 피처). rev_to 간선은 port 두 열을 바꿔 붙인다."""
+    FEAT16 열 순서: 기본 4 + in_port + out_port + (단계별 추가 피처). rev_to 간선은 port 두 열을 바꿔 붙인다.
+    메모리: 그래프에는 엣지 피처를 복사해 넣지 않는다. 간선마다 tx 행 번호(`orig`, int32)만 두고 배치 변환 때 FEAT16[orig] 로 꺼낸다.
+    (01 처럼 to / rev_to 에 각각 복사하면 피처 10열 기준 학습 그래프 +4.6GB → 02 에서 24GB 로 커널 사망. 모델 입력은 동일)"""
 
     def __init__(self, tx, feat_z, cfg, train_rows, val_idx, test_idx, port_cols):
         import torch
@@ -255,7 +257,7 @@ class GraphStore:
         self.SRC = tx['src'].to_numpy().copy(); self.DST = tx['dst'].to_numpy().copy(); self.Y = tx['y'].to_numpy().astype(np.uint8)
         self.FEAT16 = torch.as_tensor(feat_z).to(torch.float16)
         self.PORT_COLS = list(port_cols)
-        self.rows = dict(train=train_rows, val=val_idx, test=test_idx)
+        self.rows = {k: np.asarray(v, dtype=np.int64) for k, v in dict(train=train_rows, val=val_idx, test=test_idx).items()}
         self.current = dict(name=None, graph=None, targets=None, loader=None)
         log(f"간선 수 (정방향): 학습까지 {self.N['train']:,}  검증까지 {self.N['val']:,}  테스트까지 {self.N['test']:,}")
 
@@ -270,26 +272,25 @@ class GraphStore:
 
     def build_graph(self, n_rows, tx_rows):
         """tx 앞 n_rows 건으로 hetero 그래프 + target(tx_rows) 의 to 간선 위치. 타입마다 도착 노드순 정렬 (is_sorted=True 용).
-        텐서를 미리 할당하고 제자리에서 채워 임시 복사본을 안 만든다"""
+        간선 속성은 edge_index 와 orig(tx 행 번호) 뿐. 텐서를 미리 할당하고 제자리에서 채워 임시 복사본을 안 만든다"""
         import torch
         from torch_geometric.data import HeteroData
-        t0 = time.time(); m = n_rows; F = self.FEAT16
+        t0 = time.time(); m = n_rows
         data = HeteroData(); data['node'].x = torch.ones(self.NUM_NODES, 1); data['node'].num_nodes = self.NUM_NODES
         src = torch.as_tensor(self.SRC[:m]); dst = torch.as_tensor(self.DST[:m])
+        # to: u → v, col = dst 순
         perm = torch.argsort(dst.to(torch.long))
         ei = torch.empty(2, m, dtype=torch.long); ei[0] = src[perm]; ei[1] = dst[perm]
-        attr = torch.empty(m, F.shape[1], dtype=torch.float16); torch.index_select(F, 0, perm, out=attr)
-        data[TO].edge_index, data[TO].edge_attr, data[TO].y = ei, attr, torch.as_tensor(self.Y[:m])[perm]
+        data[TO].edge_index, data[TO].orig, data[TO].y = ei, perm.to(torch.int32), torch.as_tensor(self.Y[:m])[perm]
         fwd_pos = torch.empty(m, dtype=torch.long); fwd_pos[perm] = torch.arange(m)
-        targets = fwd_pos[torch.as_tensor(np.asarray(tx_rows))]
-        assert (data[TO].y[targets].numpy() == self.Y[np.asarray(tx_rows)]).all(), 'target 위치 오류'
-        del perm, fwd_pos, ei, attr
+        targets = fwd_pos[torch.as_tensor(tx_rows)]
+        assert (data[TO].y[targets].numpy() == self.Y[tx_rows]).all(), 'target 위치 오류'
+        del perm, fwd_pos, ei
+        # rev_to: v → u, col = src 순 (port 열 교환은 배치 변환에서)
         perm = torch.argsort(src.to(torch.long))
         ei = torch.empty(2, m, dtype=torch.long); ei[0] = dst[perm]; ei[1] = src[perm]
-        attr = torch.empty(m, F.shape[1], dtype=torch.float16); torch.index_select(F, 0, perm, out=attr)
-        attr[:, self.PORT_COLS] = attr[:, self.PORT_COLS[::-1]]
-        data[REV].edge_index, data[REV].edge_attr = ei, attr
-        del perm, ei, attr, src, dst
+        data[REV].edge_index, data[REV].orig = ei, perm.to(torch.int32)
+        del perm, ei, src, dst
         log(f'그래프 to {m:,} + rev_to {m:,} 간선 (정렬됨)  {time.time()-t0:.0f}s')
         return data, targets
 
@@ -299,7 +300,7 @@ class GraphStore:
         return LinkNeighborLoader(
             graph, num_neighbors={TO: cfg.num_neighbors, REV: cfg.num_neighbors},
             edge_label_index=(TO, graph[TO].edge_index[:, targets]), edge_label=graph[TO].y[targets],
-            batch_size=cfg.batch_size, shuffle=shuffle, transform=AddEgoIdsAndTargetAttr(graph, targets),
+            batch_size=cfg.batch_size, shuffle=shuffle, transform=AddEgoIdsAndTargetAttr(self.FEAT16, self.PORT_COLS, graph[TO].orig[targets]),
             is_sorted=True, num_workers=cfg.num_workers, persistent_workers=cfg.num_workers > 0)
 
     def use(self, name):
@@ -317,16 +318,22 @@ class GraphStore:
 
 
 class AddEgoIdsAndTargetAttr:
-    """1) ego ID 열을 x 에 붙임  2) seed 간선 원 피처를 batch.target_attr 로  3) float16/uint8 → float32/long"""
-    def __init__(self, graph, targets):
-        self.edge_attr, self.targets = graph[TO].edge_attr, targets
+    """배치 변환
+    1) ego ID 열을 x 에 붙임
+    2) 엣지 피처를 FEAT16[orig] 로 꺼냄 (그래프에는 tx 행 번호만 있음). rev_to 는 in_port ↔ out_port 교환
+    3) seed 간선 원 피처를 batch.target_attr 로 (target_rows = seed 들의 tx 행 번호, input_id 순)
+    4) uint8 라벨 → long"""
+    def __init__(self, feat16, port_cols, target_rows):
+        self.F, self.port_cols, self.target_rows = feat16, list(port_cols), target_rows
 
     def __call__(self, batch):
         import torch
         ego = torch.zeros(batch['node'].num_nodes, 1); ego[batch[TO].edge_label_index.flatten()] = 1
         batch['node'].x = torch.cat([batch['node'].x, ego], 1)
-        batch[TO].edge_attr = batch[TO].edge_attr.float(); batch[REV].edge_attr = batch[REV].edge_attr.float()
-        batch.target_attr = self.edge_attr[self.targets[batch[TO].input_id]].float()
+        batch[TO].edge_attr = self.F[batch[TO].orig.long()].float()
+        rev = self.F[batch[REV].orig.long()].float(); rev[:, self.port_cols] = rev[:, self.port_cols[::-1]]
+        batch[REV].edge_attr = rev
+        batch.target_attr = self.F[self.target_rows[batch[TO].input_id].long()].float()
         batch[TO].edge_label = batch[TO].edge_label.long()
         return batch
 
