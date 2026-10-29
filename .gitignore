@@ -8,3 +8,6 @@
 *.duckdb.wal
 *.duckdb.tmp/
 __pycache__/
+
+code/binary_classification/results/**/*.parquet
+code/binary_classification/results/**/*.pt
