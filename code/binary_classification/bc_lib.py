@@ -41,9 +41,25 @@ def log(msg):
 
 
 def trim(label=''):
-    """지운 메모리를 OS 에 돌려주고(glibc 는 안 돌려줄 때가 많다) 현재 RSS 를 찍는다"""
+    """지운 메모리를 OS 에 돌려주고(glibc 는 안 돌려줄 때가 많다) 현재 RSS 를 찍는다.
+    pyarrow 풀(mimalloc/jemalloc)도 parquet 을 읽고 난 메모리를 쥐고 있어서 같이 돌려준다"""
     gc.collect(); ctypes.CDLL('libc.so.6').malloc_trim(0)
+    try:
+        import pyarrow as pa; pa.default_memory_pool().release_unused()
+    except Exception:
+        pass
     print(f'RSS {psutil.Process().memory_info().rss / 1e9:.1f} GB {label}')
+
+
+def release_mmap(arr):
+    """memmap 이 읽어 들인 파일 페이지를 이 프로세스의 상주 집합에서 뺀다 (MADV_DONTNEED). 데이터는 디스크/페이지 캐시에 그대로.
+    6.5GB 행렬을 한 번 훑으면 RSS 가 그만큼 올라 보이는데, 깨끗한 파일 페이지라 OOM kill 대상은 아니지만 숫자를 정직하게 보려고"""
+    import mmap
+    try:
+        if isinstance(arr, np.memmap) and arr._mmap is not None:
+            arr._mmap.madvise(mmap.MADV_DONTNEED)
+    except Exception:
+        pass
 
 
 # ============================================================================ 설정
@@ -272,6 +288,7 @@ def rows_matrix(feat_z, rows, cols, dtype=np.float32, chunk=10_000_000):
     rows = np.asarray(rows); X = np.empty((len(rows), len(cols)), dtype)
     for a in range(0, len(rows), chunk):
         X[a:a + chunk] = feat_z[rows[a:a + chunk]][:, cols]
+    release_mmap(feat_z)
     return X
 
 
@@ -280,6 +297,7 @@ def predict_rows(model, feat_z, rows, cols, chunk=5_000_000):
     rows = np.asarray(rows); out = np.empty(len(rows), np.float32)
     for a in range(0, len(rows), chunk):
         out[a:a + chunk] = model.predict_proba(rows_matrix(feat_z, rows[a:a + chunk], cols))[:, 1]
+    release_mmap(feat_z)
     return out
 
 
