@@ -74,8 +74,11 @@
 
 ### 03 계좌 단기 활동 (account activity)
 - 노리는 패턴: FAN-IN, FAN-OUT, GATHER-SCATTER (한 계좌가 짧은 시간에 여러 상대와)
-- 피처 (src · dst 각각, 창 1h 와 1일):
-  - 거래 수 (`sender_count_1h`, `sender_count_1d`, `receiver_*`)
+- 피처 (src · dst 각각, 창 1h 와 1일): 
+  - `src_out_1h`, `src_out_1d` :	송신 계좌가 최근 1h / 24h에 보낸 건수
+  - `src_uniq_dst_1d` : 송신 계좌의 최근 24h 상대 계좌 수
+  - `src_out_amt_1d` :	송신 계좌의 최근 24h 송금액 합
+  - `dst_in_1h`, `dst_in_1d`, `dst_uniq_src_1d`, `dst_in_amt_1d` : 수신 계좌 쪽 같은 네 개
   - **상대 계좌 수** (distinct) — v10 의 `sender_count_1h` 는 거래 수라 "같은 상대 30번" 과 "30곳 1번씩" 을 구분 못 함. GFP fan 이 가장 큰 효과였던 이유
   - 금액 합
 - 창 기준: 거래 시각 이전만. 누적 버전은 넣지 않음 (04_node_count_drift 에서 드리프트 확인됨)
