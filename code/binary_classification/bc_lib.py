@@ -222,8 +222,11 @@ def evaluate_sample(sample_df, score):
 def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, cfg, results, n_jobs=8):
     import lightgbm as lgb, xgboost as xgb
     t0 = time.time()
+    # reg_lambda=1, min_child_weight=1 은 XGBoost 기본값과 같은 정규화. LightGBM 기본(0, 1e-3)으로는 양성 0.1% + boost_from_average 에서
+    # 헤시안 합이 아주 작아 잎 값이 폭주 → 2~3 라운드 만에 확률이 1.0 에 포화되고 AP 가 꺾여 early stopping 이 2 에서 걸렸다
     lgb_model = lgb.LGBMClassifier(n_estimators=cfg.tree_rounds, learning_rate=0.05, num_leaves=63, scale_pos_weight=cfg.scale_pos_weight,
-                                   subsample=0.8, subsample_freq=1, colsample_bytree=1.0, random_state=cfg.seed, n_jobs=n_jobs, verbose=-1)
+                                   subsample=0.8, subsample_freq=1, colsample_bytree=1.0, reg_lambda=1.0, min_child_weight=1.0,
+                                   random_state=cfg.seed, n_jobs=n_jobs, verbose=-1)
     lgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], eval_sample_weight=[w_val], eval_metric='average_precision',
                   callbacks=[lgb.early_stopping(cfg.tree_early_stop, first_metric_only=True, verbose=False)])  # AP 만 보고 멈춘다 (기본값은 logloss 도 같이 봐서 2라운드에 끊김)
     results['lightgbm'] = dict(val=evaluate_sample(val_df, lgb_model.predict_proba(X_val)[:, 1]),
@@ -497,15 +500,40 @@ def load_scores(path):
     return pd.read_parquet(path)
 
 
-BUDGETS = (0.001, 0.005, 0.01, 0.02, 0.05)   # 알림 예산 (테스트 전체 상위 비율). 0.1% ≈ 양성 수와 비슷한 규모, 1% = 논문 관행
+BUDGETS = (0.0005, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 1.0)   # 알림 예산 (테스트 전체 상위 비율). 0.1% ≈ 양성 수 규모 ≈ argmax 운영점, 1% = 논문 관행, 1.0 = 전체
+
+
+def cut_name(b):
+    return 'all' if b >= 1 else f'r@{b*100:g}%'
 
 
 def cut_thresholds(score, budgets=BUDGETS, argmax=True):
-    """운영점(컷) 이름 → 임계값. 'r@0.1%' … 는 예산 컷, 'argmax' 는 확률 0.5 (Multi-GNN 부록 Table 13 의 recall 과 같은 기준)"""
-    cuts = {f'r@{b*100:g}%': float(np.quantile(score, 1 - b)) for b in budgets}
+    """운영점(컷) 이름 → 임계값. 'r@0.1%' … 는 예산 컷, 'all' 은 전부 알림, 'argmax' 는 확률 0.5 (Multi-GNN 부록 Table 13 의 recall 과 같은 기준)"""
+    cuts = {cut_name(b): (float(score.min()) if b >= 1 else float(np.quantile(score, 1 - b))) for b in budgets}
     if argmax:
         cuts['argmax'] = 0.5
     return cuts
+
+
+def cut_table(scores, budgets=BUDGETS, argmax=True):
+    """컷별 임계값·알림 수·TP·FP·FN·precision·recall 한 표 (confusion_breakdown 의 matrix 만)"""
+    return confusion_breakdown(scores, {}, budgets, argmax)['matrix']
+
+
+def group_by_cut(scores, labels, budgets=BUDGETS, argmax=True, min_pos=1):
+    """그룹(라벨 배열) × 컷 → recall (그룹 안 양성 중 잡은 비율) 과 precision (그룹 안 알림 중 양성 비율).
+    패턴이면 양성만 있는 그룹이라 recall 만, 차수 구간이면 둘 다 의미 있다"""
+    y = scores['y'].to_numpy().astype(bool); sc = scores['score'].to_numpy(); lab = np.asarray(labels)
+    cuts = cut_thresholds(sc, budgets, argmax)
+    rec, prec, n_pos = {}, {}, {}
+    for g in pd.unique(lab):
+        m = lab == g; yg = y[m]; sg = sc[m]; n_pos[g] = int(yg.sum())
+        if n_pos[g] < min_pos:
+            continue
+        rec[g] = {k: float((yg & (sg >= t)).sum() / n_pos[g]) for k, t in cuts.items()}
+        prec[g] = {k: float((yg & (sg >= t)).sum() / max((sg >= t).sum(), 1)) for k, t in cuts.items()}
+    return dict(recall=pd.DataFrame(rec).T.assign(n_pos=pd.Series(n_pos)).round(4),
+                precision=pd.DataFrame(prec).T.assign(n_pos=pd.Series(n_pos)).round(4))
 
 
 def pattern_label(scores):
@@ -608,3 +636,56 @@ def analyze(name, scores_path, cfg, con, test_dst):
     pr = pattern_recall(sc)
     ds = degree_stratified(sc, test_dst, recipient_indegree(con, cfg))
     return pr.assign(model=name), ds.assign(model=name)
+
+
+# ============================================================================ 8. 그림 (결과 절)
+def plot_pr(scores_by_model, path=None, mark=None):
+    """모델별 PR 곡선 (범례에 AP). mark: (recall, 라벨) 세로선, 예) argmax 운영점"""
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import precision_recall_curve, average_precision_score
+    fig, ax = plt.subplots(figsize=(5, 4))
+    for name, sc in scores_by_model.items():
+        y = sc['y'].to_numpy(); s = sc['score'].to_numpy()
+        p, r, _ = precision_recall_curve(y, s)
+        ax.plot(r[::50], p[::50], lw=1.5, label=f'{name} (AP {average_precision_score(y, s):.3f})')   # 2,700 만 점은 50 개 중 1 개만 그려도 곡선 동일
+    if mark is not None:
+        ax.axvline(mark[0], ls='--', c='gray', lw=1, label=mark[1])
+    ax.set_xlabel('recall'); ax.set_ylabel('precision'); ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.grid(alpha=.3); ax.legend(loc='upper right')
+    plt.tight_layout()
+    if path: plt.savefig(path, dpi=120)
+    plt.show()
+
+
+def plot_confusion_grid(scores, cuts=('r@0.1%', 'r@1%', 'r@10%', 'argmax'), title='', path=None, budgets=BUDGETS):
+    """컷마다 2×2 혼동행렬을 나란히. 색 = 행 비율 (세탁 행 = recall), 숫자 = 건수. TN 이 2,700 만이라 건수 색은 의미 없어 행 정규화"""
+    import matplotlib.pyplot as plt
+    mat = cut_table(scores, budgets).loc[list(cuts)]
+    fig, axes = plt.subplots(1, len(cuts), figsize=(3.2 * len(cuts), 3.4))
+    for ax, (k, m) in zip(np.atleast_1d(axes), mat.iterrows()):
+        cm = np.array([[m.TN, m.FP], [m.FN, m.TP]], dtype=np.int64); rate = cm / cm.sum(axis=1, keepdims=True)
+        ax.imshow(rate, cmap='Blues', vmin=0, vmax=1)
+        for i in range(2):
+            for j in range(2):
+                ax.text(j, i, f'{cm[i, j]:,}\n({rate[i, j]:.1%})', ha='center', va='center', fontsize=8, color='white' if rate[i, j] > 0.6 else 'black')
+        ax.set_xticks([0, 1]); ax.set_xticklabels(['pred normal', 'pred laund.'], fontsize=8); ax.set_yticks([0, 1]); ax.set_yticklabels(['normal', 'laund.'], fontsize=8)
+        ax.set_title(f'{k} (thr {m.threshold:.3f})\nP {m.precision:.3f}  R {m.recall:.3f}', fontsize=9)
+    fig.suptitle(title); plt.tight_layout()
+    if path: plt.savefig(path, dpi=120)
+    plt.show()
+
+
+def plot_heatmap(df, title='', path=None, fmt='{:.2f}', figsize=None, vmax=1.0):
+    """행 × 열 표를 색 + 숫자로. 패턴 × 컷 recall, 차수 구간 × 컷 precision 등에 쓴다"""
+    import matplotlib.pyplot as plt
+    a = df.to_numpy(dtype=float)
+    fig, ax = plt.subplots(figsize=figsize or (1.0 * df.shape[1] + 2, 0.45 * df.shape[0] + 1.2))
+    ax.imshow(a, cmap='Blues', vmin=0, vmax=vmax, aspect='auto')
+    ax.set_xticks(range(df.shape[1])); ax.set_xticklabels(df.columns, rotation=30, ha='right', fontsize=8)
+    ax.set_yticks(range(df.shape[0])); ax.set_yticklabels(df.index, fontsize=8)
+    for i in range(df.shape[0]):
+        for j in range(df.shape[1]):
+            if not np.isnan(a[i, j]):
+                ax.text(j, i, fmt.format(a[i, j]), ha='center', va='center', fontsize=7, color='white' if a[i, j] > 0.6 * vmax else 'black')
+    ax.set_title(title, fontsize=10); plt.tight_layout()
+    if path: plt.savefig(path, dpi=120)
+    plt.show()
