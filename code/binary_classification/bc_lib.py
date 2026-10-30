@@ -151,14 +151,18 @@ def ensure_ports(con, cfg):
     return path
 
 
-def attach_parquet(tx, path, cols):
-    """edge_id 순으로 저장된 피처 parquet 의 열들을 tx 에 붙인다 (행 순서가 같은지 확인). DuckDB 조인은 1.8억 × 1.8억이라 메모리 초과"""
+def attach_parquet(tx, path, cols, dtype=None):
+    """edge_id 순으로 저장된 피처 parquet 의 열들을 tx 에 붙인다 (행 순서가 같은지 확인). DuckDB 조인은 1.8억 × 1.8억이라 메모리 초과.
+    dtype=np.float16 이면 붙이면서 반으로 줄인다 (ln 변환된 피처라 충분. 1.8억 행 × 열당 0.36GB). 열을 하나씩 읽어 피크를 낮춘다"""
     import pyarrow.parquet as pq
-    tbl = pq.read_table(path, columns=['edge_id'] + list(cols))
-    assert (tbl.column('edge_id').to_numpy() == tx['edge_id'].to_numpy()).all(), f'{path.name} 행 순서가 tx 와 다름'
+    ids = pq.read_table(path, columns=['edge_id']).column('edge_id').to_numpy()
+    assert (ids == tx['edge_id'].to_numpy()).all(), f'{path.name} 행 순서가 tx 와 다름'
+    del ids
     for c in cols:
-        tx[c] = tbl.column(c).to_numpy()
-    del tbl; gc.collect()
+        arr = pq.read_table(path, columns=[c]).column(c).to_numpy()
+        tx[c] = arr.astype(dtype) if dtype is not None else arr
+        del arr
+    gc.collect()
     return tx
 
 
@@ -167,16 +171,19 @@ def window_mask(df, window):
     return ((df['day'] >= pd.Timestamp(a)) & (df['day'] <= pd.Timestamp(b))).to_numpy()
 
 
-def znorm_features(tx, cols, in_train):
-    """tx 의 cols 를 열 하나씩 float32 배열로 뽑아 학습 구간 통계로 z-norm. 뽑은 열은 tx 에서 떨어뜨린다.
+def znorm_features(tx, cols, in_train, out_dtype=np.float16):
+    """tx 의 cols 를 열 하나씩 float32 로 뽑아 학습 구간 통계로 z-norm 한 뒤 out_dtype(기본 float16) 행렬에 넣는다. 뽑은 열은 그때그때 tx 에서 떨어뜨린다.
+    (01·02 는 float32 행렬이었다 — 18열이면 13GB 라 03 부터 float16. GraphStore 의 FEAT16 과 같은 dtype 이라 복사도 없다)
     (tx[cols].to_numpy() 는 dtype 이 섞여 float64 로 먼저 합쳐 1.8억 × 6 이면 8.6GB → 열 단위로)"""
-    feat_z = np.empty((len(tx), len(cols)), np.float32)
+    feat_z = np.empty((len(tx), len(cols)), out_dtype)
     mu = np.empty(len(cols), np.float32); sd = np.empty(len(cols), np.float32)
     for j, col in enumerate(cols):
-        feat_z[:, j] = tx[col].to_numpy()
-        mu[j] = feat_z[in_train, j].mean(); sd[j] = feat_z[in_train, j].std() + 1e-6
-        feat_z[:, j] -= mu[j]; feat_z[:, j] /= sd[j]
-    tx.drop(columns=list(cols), inplace=True); gc.collect()
+        v = tx[col].to_numpy().astype(np.float32)
+        mu[j] = v[in_train].mean(); sd[j] = v[in_train].std() + 1e-6
+        v -= mu[j]; v /= sd[j]
+        feat_z[:, j] = v
+        del v; tx.drop(columns=[col], inplace=True)
+    gc.collect()
     return feat_z, pd.DataFrame({'feature': cols, 'mean(train)': mu, 'std(train)': sd})
 
 
@@ -253,13 +260,22 @@ class GraphStore:
     메모리: 그래프에는 엣지 피처를 복사해 넣지 않는다. 간선마다 tx 행 번호(`orig`, int32)만 두고 배치 변환 때 FEAT16[orig] 로 꺼낸다.
     (01 처럼 to / rev_to 에 각각 복사하면 피처 10열 기준 학습 그래프 +4.6GB → 02 에서 24GB 로 커널 사망. 모델 입력은 동일)"""
 
-    def __init__(self, tx, feat_z, cfg, train_rows, val_idx, test_idx, port_cols):
+    def __init__(self, tx, feat_z, cfg, train_rows, val_idx, test_idx, port_cols, feat_memmap=None):
+        """feat_memmap: 경로를 주면 피처 행렬을 .npy 로 내려 쓰고 memmap 으로 읽는다 → 1.8억 × 18열 float16 6.5GB 가 RSS 에서 빠진다
+        (페이지 캐시는 cgroup 이 압박 시 회수하므로 OOM kill 대상이 아님). 배치마다 F[orig] 를 디스크/캐시에서 모아 읽는다"""
         import torch
         self.cfg = cfg
         self.NUM_NODES = int(max(tx['src'].max(), tx['dst'].max())) + 1
         self.N = {k: self._rows_until(tx, w) for k, w in (('train', cfg.train_window), ('val', cfg.val_window), ('test', cfg.test_window))}
         self.SRC = tx['src'].to_numpy().copy(); self.DST = tx['dst'].to_numpy().copy(); self.Y = tx['y'].to_numpy().astype(np.uint8)
-        self.FEAT16 = torch.as_tensor(feat_z).to(torch.float16)
+        if feat_memmap is not None:
+            feat_memmap = Path(feat_memmap)
+            if not (feat_memmap.exists() and np.load(feat_memmap, mmap_mode='r').shape == feat_z.shape):
+                np.save(feat_memmap, np.asarray(feat_z, dtype=np.float16))
+            self.FEAT16 = np.load(feat_memmap, mmap_mode='r')          # numpy memmap (float16). 변환에서 numpy 인덱싱
+            log(f'피처 행렬 memmap {feat_memmap.name} {tuple(self.FEAT16.shape)}')
+        else:
+            self.FEAT16 = torch.as_tensor(feat_z).to(torch.float16)
         self.PORT_COLS = list(port_cols)
         self.rows = {k: np.asarray(v, dtype=np.int64) for k, v in dict(train=train_rows, val=val_idx, test=test_idx).items()}
         self.current = dict(name=None, graph=None, targets=None, loader=None)
@@ -330,14 +346,21 @@ class AddEgoIdsAndTargetAttr:
     def __init__(self, feat16, port_cols, target_rows):
         self.F, self.port_cols, self.target_rows = feat16, list(port_cols), target_rows
 
+    def rows(self, idx):
+        """F[idx] 를 float32 텐서로. F 가 torch 텐서(RAM)든 numpy memmap(디스크)이든 같은 결과"""
+        import torch
+        if isinstance(self.F, torch.Tensor):
+            return self.F[idx.long()].float()
+        return torch.from_numpy(self.F[idx.numpy()].astype(np.float32))
+
     def __call__(self, batch):
         import torch
         ego = torch.zeros(batch['node'].num_nodes, 1); ego[batch[TO].edge_label_index.flatten()] = 1
         batch['node'].x = torch.cat([batch['node'].x, ego], 1)
-        batch[TO].edge_attr = self.F[batch[TO].orig.long()].float()
-        rev = self.F[batch[REV].orig.long()].float(); rev[:, self.port_cols] = rev[:, self.port_cols[::-1]]
+        batch[TO].edge_attr = self.rows(batch[TO].orig)
+        rev = self.rows(batch[REV].orig); rev[:, self.port_cols] = rev[:, self.port_cols[::-1]]
         batch[REV].edge_attr = rev
-        batch.target_attr = self.F[self.target_rows[batch[TO].input_id].long()].float()
+        batch.target_attr = self.rows(self.target_rows[batch[TO].input_id])
         batch[TO].edge_label = batch[TO].edge_label.long()
         return batch
 
