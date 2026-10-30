@@ -222,10 +222,11 @@ def evaluate_sample(sample_df, score):
 def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, cfg, results, n_jobs=8):
     import lightgbm as lgb, xgboost as xgb
     t0 = time.time()
-    # reg_lambda=1, min_child_weight=1 은 XGBoost 기본값과 같은 정규화. LightGBM 기본(0, 1e-3)으로는 양성 0.1% + boost_from_average 에서
-    # 헤시안 합이 아주 작아 잎 값이 폭주 → 2~3 라운드 만에 확률이 1.0 에 포화되고 AP 가 꺾여 early stopping 이 2 에서 걸렸다
+    # max_delta_step: 잎 출력 상한 (최종 잎 값 ≤ lr × 0.7). 양성 0.1% + boost_from_average(초기 p≈0.006) 에서 순수 양성 잎의 잎 값이
+    # −G/H ≈ 1/p ≈ 160 으로 폭주 → 트리 1개로 확률이 1.0 에 포화(검증 표본 2.7%, 그중 97% 양성)되고 AP 가 더 안 올라 best_iteration=1 로 끝났다.
+    # reg_lambda=1 로는 못 막음 (G/H 비가 160 이라 λ=1 은 무의미). reg_lambda·min_child_weight 는 XGBoost 기본값과 맞춘 것
     lgb_model = lgb.LGBMClassifier(n_estimators=cfg.tree_rounds, learning_rate=0.05, num_leaves=63, scale_pos_weight=cfg.scale_pos_weight,
-                                   subsample=0.8, subsample_freq=1, colsample_bytree=1.0, reg_lambda=1.0, min_child_weight=1.0,
+                                   subsample=0.8, subsample_freq=1, colsample_bytree=1.0, reg_lambda=1.0, min_child_weight=1.0, max_delta_step=0.7,
                                    random_state=cfg.seed, n_jobs=n_jobs, verbose=-1)
     lgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], eval_sample_weight=[w_val], eval_metric='average_precision',
                   callbacks=[lgb.early_stopping(cfg.tree_early_stop, first_metric_only=True, verbose=False)])  # AP 만 보고 멈춘다 (기본값은 logloss 도 같이 봐서 2라운드에 끊김)
