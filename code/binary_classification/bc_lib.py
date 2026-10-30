@@ -106,8 +106,43 @@ def code_tables(con, cfg):
     return currency_codes, format_codes
 
 
+def load_tx_lowmem(con, cfg, port_path=None):
+    """load_tx 의 저메모리 판 (03 부터). DuckDB 로 한 번에 .df() 하면 DuckDB 결과(최대 12GB) + pandas 가 동시에 살아 피크가 20GB 를 넘는다 (03 에서 RSS 25.5GB).
+    대신 ① 기본 열을 edge_id 순 parquet(features_bc/tx_base.parquet) 으로 한 번 COPY 해 두고 (스트리밍이라 DuckDB 메모리 작음)
+         ② 열 하나씩 numpy 로 읽어 DataFrame 을 만든다 (피크 = 완성된 tx + 열 하나).  timestamp 는 float32 (초 단위 7.8e6 까지 정확)
+    port_path 를 주면 port 두 열도 int32 로 같이 붙인다. 코드표(currency_codes, format_codes)는 con 에 등록돼 있어야 한다"""
+    import pyarrow.parquet as pq
+    base = cfg.feat_dir / 'tx_base.parquet'
+    if not base.exists():
+        t0 = time.time()
+        con.execute(f"""
+            COPY (
+                SELECT t.edge_id, t.src::INT AS src, t.dst::INT AS dst, CAST(t.day AS TIMESTAMP) AS day,
+                       (epoch(t.ts) - (SELECT epoch(min(ts)) FROM read_parquet({L.q(cfg.tx_path)})))::FLOAT AS timestamp,
+                       t.received::FLOAT AS amount_received,
+                       coalesce(c.code, -1)::SMALLINT AS received_currency,
+                       coalesce(f.code, -1)::SMALLINT AS payment_format,
+                       t.is_laundering::TINYINT AS y
+                FROM read_parquet({L.q(cfg.tx_path)}) t
+                LEFT JOIN currency_codes c ON c.v = t.receiving_currency
+                LEFT JOIN format_codes   f ON f.v = t.payment_format
+                ORDER BY t.edge_id
+            ) TO {L.q(base)} (FORMAT PARQUET, COMPRESSION ZSTD)""")
+        log(f'tx_base.parquet 생성 {time.time()-t0:.0f}s')
+    cols = {}
+    for c in ['edge_id', 'src', 'dst', 'day', 'timestamp', 'amount_received', 'received_currency', 'payment_format', 'y']:
+        arr = pq.read_table(base, columns=[c]).column(c).to_numpy()
+        cols[c] = arr.astype('datetime64[ns]') if c == 'day' else arr
+        del arr
+    tx = pd.DataFrame(cols, copy=False); del cols; gc.collect()
+    if port_path is not None:
+        tx = attach_parquet(tx, port_path, PORT_FEATURES, dtype=np.int32)
+    return tx
+
+
 def load_tx(con, cfg):
-    """거래 전체 (edge_id 순): edge_id, src, dst, day, 기본 피처 4, y.  문자열 열은 pandas 에 올리지 않는다 (코드 테이블 조인)"""
+    """거래 전체 (edge_id 순): edge_id, src, dst, day, 기본 피처 4, y.  문자열 열은 pandas 에 올리지 않는다 (코드 테이블 조인)
+    (01·02 가 쓰는 판. 피처가 많아지는 03 부터는 load_tx_lowmem)"""
     return con.execute(f"""
         SELECT t.edge_id, t.src::INT AS src, t.dst::INT AS dst, CAST(t.day AS TIMESTAMP) AS day,
                epoch(t.ts) - (SELECT epoch(min(ts)) FROM read_parquet({L.q(cfg.tx_path)}))  AS timestamp,
@@ -171,11 +206,14 @@ def window_mask(df, window):
     return ((df['day'] >= pd.Timestamp(a)) & (df['day'] <= pd.Timestamp(b))).to_numpy()
 
 
-def znorm_features(tx, cols, in_train, out_dtype=np.float16):
+def znorm_features(tx, cols, in_train, out_dtype=np.float16, out_path=None):
     """tx 의 cols 를 열 하나씩 float32 로 뽑아 학습 구간 통계로 z-norm 한 뒤 out_dtype(기본 float16) 행렬에 넣는다. 뽑은 열은 그때그때 tx 에서 떨어뜨린다.
     (01·02 는 float32 행렬이었다 — 18열이면 13GB 라 03 부터 float16. GraphStore 의 FEAT16 과 같은 dtype 이라 복사도 없다)
     (tx[cols].to_numpy() 는 dtype 이 섞여 float64 로 먼저 합쳐 1.8억 × 6 이면 8.6GB → 열 단위로)"""
-    feat_z = np.empty((len(tx), len(cols)), out_dtype)
+    if out_path is not None:   # 디스크(.npy) 에 바로 쓰는 memmap → 행렬이 RSS 를 차지하지 않는다 (트리·GraphStore 가 그대로 읽는다)
+        feat_z = np.lib.format.open_memmap(Path(out_path), mode='w+', dtype=out_dtype, shape=(len(tx), len(cols)))
+    else:
+        feat_z = np.empty((len(tx), len(cols)), out_dtype)
     mu = np.empty(len(cols), np.float32); sd = np.empty(len(cols), np.float32)
     for j, col in enumerate(cols):
         v = tx[col].to_numpy().astype(np.float32)
@@ -183,6 +221,8 @@ def znorm_features(tx, cols, in_train, out_dtype=np.float16):
         v -= mu[j]; v /= sd[j]
         feat_z[:, j] = v
         del v; tx.drop(columns=[col], inplace=True)
+    if out_path is not None:
+        feat_z.flush(); feat_z = np.load(Path(out_path), mmap_mode='r')   # 더티 페이지를 내려 쓰고 읽기 전용으로 다시 연다
     gc.collect()
     return feat_z, pd.DataFrame({'feature': cols, 'mean(train)': mu, 'std(train)': sd})
 
@@ -268,7 +308,10 @@ class GraphStore:
         self.NUM_NODES = int(max(tx['src'].max(), tx['dst'].max())) + 1
         self.N = {k: self._rows_until(tx, w) for k, w in (('train', cfg.train_window), ('val', cfg.val_window), ('test', cfg.test_window))}
         self.SRC = tx['src'].to_numpy().copy(); self.DST = tx['dst'].to_numpy().copy(); self.Y = tx['y'].to_numpy().astype(np.uint8)
-        if feat_memmap is not None:
+        if isinstance(feat_z, np.memmap) and feat_z.dtype == np.float16:
+            self.FEAT16 = feat_z                                        # znorm_features(out_path=…) 가 만든 memmap 그대로
+            log(f'피처 행렬 memmap(기존) {tuple(self.FEAT16.shape)}')
+        elif feat_memmap is not None:
             feat_memmap = Path(feat_memmap)
             if not (feat_memmap.exists() and np.load(feat_memmap, mmap_mode='r').shape == feat_z.shape):
                 np.save(feat_memmap, np.asarray(feat_z, dtype=np.float16))
