@@ -497,18 +497,45 @@ def load_scores(path):
     return pd.read_parquet(path)
 
 
-def pattern_recall(scores, budget=0.01):
-    """패턴 유형별 recall@budget. 임계값은 테스트 전체 상위 budget 비율 (알림 예산) 하나로 고정.
-    patterns.parquet 에 없는 양성 = UNMATCHED. 같은 패턴 안의 거래는 모두 양성이므로 recall 만 본다"""
+BUDGETS = (0.001, 0.005, 0.01, 0.02, 0.05)   # 알림 예산 (테스트 전체 상위 비율). 0.1% ≈ 양성 수와 비슷한 규모, 1% = 논문 관행
+
+
+def cut_thresholds(score, budgets=BUDGETS, argmax=True):
+    """운영점(컷) 이름 → 임계값. 'r@0.1%' … 는 예산 컷, 'argmax' 는 확률 0.5 (Multi-GNN 부록 Table 13 의 recall 과 같은 기준)"""
+    cuts = {f'r@{b*100:g}%': float(np.quantile(score, 1 - b)) for b in budgets}
+    if argmax:
+        cuts['argmax'] = 0.5
+    return cuts
+
+
+def pattern_label(scores):
+    """scores 의 양성 행에 pattern_type 을 붙인다. patterns.parquet 에 없는 양성 = UNMATCHED"""
     pat = pd.read_parquet(L.BASE / 'patterns.parquet', columns=['edge_id', 'pattern_type']).dropna().drop_duplicates('edge_id')
-    thr = np.quantile(scores['score'].to_numpy(), 1 - budget)
     pos = scores[scores.y == 1].merge(pat, on='edge_id', how='left')
     pos['pattern_type'] = pos['pattern_type'].fillna('UNMATCHED')
-    pos['hit'] = pos['score'] >= thr
-    g = pos.groupby('pattern_type').agg(n=('hit', 'size'), recall=('hit', 'mean'), mean_score=('score', 'mean'))
+    return pos
+
+
+def pattern_array(scores):
+    """scores 전체 행 순서의 패턴 라벨 배열 (정상 = 'NORMAL'). confusion_breakdown 의 pattern 축용"""
+    pat = pd.read_parquet(L.BASE / 'patterns.parquet', columns=['edge_id', 'pattern_type']).dropna().drop_duplicates('edge_id')
+    lab = scores[['edge_id', 'y']].merge(pat, on='edge_id', how='left')['pattern_type']
+    lab = lab.where(scores['y'].to_numpy() == 0, lab.fillna('UNMATCHED'))
+    return lab.fillna('NORMAL').to_numpy()
+
+
+def pattern_recall(scores, budget=0.01, budgets=BUDGETS, argmax=True):
+    """패턴 유형별 recall. 열: n, recall(=budget 컷, 기존 호환), r@0.1% … r@5% (예산을 줄이면 어느 패턴이 먼저 떨어지나), r@argmax, mean_score.
+    같은 패턴 안의 거래는 모두 양성이므로 recall 만 본다"""
+    pos = pattern_label(scores)
+    cuts = {'recall': float(np.quantile(scores['score'].to_numpy(), 1 - budget))}
+    cuts.update(cut_thresholds(scores['score'].to_numpy(), budgets, argmax))
+    for k, thr in cuts.items():
+        pos[k] = pos['score'] >= thr
+    g = pos.groupby('pattern_type').agg(n=('score', 'size'), **{k: (k, 'mean') for k in cuts}, mean_score=('score', 'mean'))
     g = g.reindex([p for p in PATTERN_ORDER if p in g.index] + [p for p in g.index if p not in PATTERN_ORDER])
-    g.loc['ALL'] = dict(n=len(pos), recall=pos['hit'].mean(), mean_score=pos['score'].mean())
-    g.attrs['threshold'] = float(thr)
+    g.loc['ALL'] = dict(n=len(pos), **{k: pos[k].mean() for k in cuts}, mean_score=pos['score'].mean())
+    g.attrs['thresholds'] = cuts
     return g.round(4)
 
 
@@ -534,9 +561,45 @@ def degree_stratified(scores, dst_of_edge, in_degree, budget=0.01):
             p, r, _ = precision_recall_curve(y, sc); f1 = 2 * p[:-1] * r[:-1] / np.maximum(p[:-1] + r[:-1], 1e-12)
             pred = sc >= 0.5; tp = (pred & (y == 1)).sum(); fp = (pred & (y == 0)).sum(); fn = (~pred & (y == 1)).sum()
             row.update(AP=average_precision_score(y, sc), F1=f1.max(), F1_at_0_5=2 * tp / max(2 * tp + fp + fn, 1e-12),
-                       recall_at_budget=((sc >= thr) & (y == 1)).sum() / n_pos)
+                       recall_at_budget=((sc >= thr) & (y == 1)).sum() / n_pos, recall_argmax=tp / n_pos)
         rows.append(row)
     return pd.DataFrame(rows).set_index('bin').round(4)
+
+
+def degree_bin_of(dst_of_edge, in_degree):
+    """간선별 수신 계좌 in-degree 구간 라벨 (confusion_breakdown 의 축으로 쓴다)"""
+    deg = in_degree.reindex(dst_of_edge).to_numpy()
+    labels = [f'[{lo}-{hi}]' if hi < 10**9 else f'[{lo}+]' for lo, hi in DEGREE_BINS]
+    return pd.cut(deg, [lo - 0.5 for lo, _ in DEGREE_BINS] + [np.inf], labels=labels).astype(str)
+
+
+def confusion_breakdown(scores, groups, budgets=BUDGETS, argmax=True):
+    """컷마다 2×2 혼동행렬 + "뭐를 헷갈렸나" 를 축별로 쪼갠 표.
+    groups: {축 이름: scores 와 같은 순서의 라벨 배열}. 예) pattern(양성만 의미 있음), degree_bin, payment_format, currency
+    돌려주는 것:
+      matrix  — 컷별 TP/FP/FN/TN, alerts, precision, recall
+      fn[axis] — 컷별 놓친 양성(FN) 수와 FN 안 비중, 그 축의 전체 양성 비중 (비중이 양성 비중보다 크면 그 그룹을 유독 놓침)
+      fp[axis] — 컷별 잘못 잡은 정상(FP) 수와 FP 안 비중, 그 축의 전체 정상 비중 (비중이 정상 비중보다 크면 그 그룹에 알림이 몰림)"""
+    y = scores['y'].to_numpy().astype(bool); sc = scores['score'].to_numpy()
+    cuts = cut_thresholds(sc, budgets, argmax)
+    mat, fn_tabs, fp_tabs = [], {}, {}
+    for k, thr in cuts.items():
+        pred = sc >= thr
+        tp = int((pred & y).sum()); fp = int((pred & ~y).sum()); fn = int((~pred & y).sum()); tn = int((~pred & ~y).sum())
+        mat.append(dict(cut=k, threshold=round(thr, 4), alerts=tp + fp, TP=tp, FP=fp, FN=fn, TN=tn,
+                        precision=round(tp / max(tp + fp, 1), 4), recall=round(tp / max(tp + fn, 1), 4)))
+    for axis, lab in groups.items():
+        lab = pd.Series(np.asarray(lab), index=scores.index)
+        fn_t = pd.DataFrame({'pos_share': lab[y].value_counts(normalize=True)})
+        fp_t = pd.DataFrame({'neg_share': lab[~y].value_counts(normalize=True)})
+        for k, thr in cuts.items():
+            pred = sc >= thr
+            fn_c = lab[y & ~pred].value_counts(); fp_c = lab[~y & pred].value_counts()
+            fn_t[f'FN {k}'] = fn_c; fn_t[f'FN% {k}'] = fn_c / max(fn_c.sum(), 1)
+            fp_t[f'FP {k}'] = fp_c; fp_t[f'FP% {k}'] = fp_c / max(fp_c.sum(), 1)
+        fn_tabs[axis] = fn_t.fillna(0).sort_values('pos_share', ascending=False).round(4)
+        fp_tabs[axis] = fp_t.fillna(0).sort_values('neg_share', ascending=False).round(4)
+    return dict(matrix=pd.DataFrame(mat).set_index('cut'), fn=fn_tabs, fp=fp_tabs)
 
 
 def analyze(name, scores_path, cfg, con, test_dst):
