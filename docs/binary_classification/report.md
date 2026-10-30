@@ -37,10 +37,14 @@
 ## 02_pair_history.ipynb 결과 (HI-Large, 기본 4 + pair 이력 4, 2026-10-30)
 
 ### 설정
-- 추가 피처: pair_prior_count, pair_gap_minutes, pair_count_1h, reverse_history_count (v10 SQL, 60분 창). GNN 은 여기에 in/out port 포함 → 10열
+- 추가 피처: 
+  - `pair_prior_count`: 이 거래 전에 A→B 로 보낸 횟수 (처음부터, 같은 분 제외)
+  - `pair_gap_minutes`: 직전 A→B 거래까지의 분
+  - `pair_count_1h`: 최근 60분 안 A→B 횟수
+  - `reverse_history_count`: 반대 방향 B→A 누적 횟수 (전날까지, 일 단위 ASOF)
+  -  GNN 은 여기에 `in/out port` 포함 → 총 10열 (트리는 한행만 보니까 그냥 정수 하나로 볼 뿐임)
 - 01 최종 설정 그대로: 이웃 [100, 100], 배치 2048, 에폭 = 256배치, EPOCHS 400, EVAL_PERIOD 4, PATIENCE 8, 검증 AP 로 선택
 - GINe: best 에폭 112 (144에서 조기 종료), 학습 16.2시간, 테스트 전체 구간 256분. 메모리 학습 20.7GB / 검증 17.2 / 테스트 19.5 (간선에 피처 복사 대신 tx 행 번호만 저장)
-- 트리는 basic 4 + pair 4 (port 없음). LightGBM 은 early stopping 이 logloss 까지 봐서 2라운드에 끊긴 상태의 수치 → `first_metric_only=True` 로 고쳐 재실행 예정
 
 ## 전체 (테스트, 01 GINe basic → 02 GINe +pair)
 
