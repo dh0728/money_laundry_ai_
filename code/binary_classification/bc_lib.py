@@ -225,7 +225,7 @@ def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, 
     lgb_model = lgb.LGBMClassifier(n_estimators=cfg.tree_rounds, learning_rate=0.05, num_leaves=63, scale_pos_weight=cfg.scale_pos_weight,
                                    subsample=0.8, subsample_freq=1, colsample_bytree=1.0, random_state=cfg.seed, n_jobs=n_jobs, verbose=-1)
     lgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], eval_sample_weight=[w_val], eval_metric='average_precision',
-                  callbacks=[lgb.early_stopping(cfg.tree_early_stop, verbose=False)])
+                  callbacks=[lgb.early_stopping(cfg.tree_early_stop, first_metric_only=True, verbose=False)])  # AP 만 보고 멈춘다 (기본값은 logloss 도 같이 봐서 2라운드에 끊김)
     results['lightgbm'] = dict(val=evaluate_sample(val_df, lgb_model.predict_proba(X_val)[:, 1]),
                                test=evaluate_sample(test_df, lgb_model.predict_proba(X_test)[:, 1]),
                                best_iteration=int(lgb_model.best_iteration_ or cfg.tree_rounds), train_sec=round(time.time() - t0))
