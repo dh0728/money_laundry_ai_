@@ -266,8 +266,27 @@ def evaluate_sample(sample_df, score):
 
 
 # ============================================================================ 3. 트리 모델
+def rows_matrix(feat_z, rows, cols, dtype=np.float32, chunk=10_000_000):
+    """feat_z[rows][:, cols] 를 임시 복사 없이 만든다 (행 묶음으로 읽어 바로 채움). memmap 이면 순서대로 읽어 페이지 캐시 친화적.
+    (feat_z[mask][:, cols].astype(f32) 는 1억 행 × 18열에서 중간 배열 3개 = 13GB 가 한꺼번에 생겨 03 에서 RSS 27GB)"""
+    rows = np.asarray(rows); X = np.empty((len(rows), len(cols)), dtype)
+    for a in range(0, len(rows), chunk):
+        X[a:a + chunk] = feat_z[rows[a:a + chunk]][:, cols]
+    return X
+
+
+def predict_rows(model, feat_z, rows, cols, chunk=5_000_000):
+    """테스트 2,700 만 행을 통째로 float32 로 만들지 않고 묶음으로 예측"""
+    rows = np.asarray(rows); out = np.empty(len(rows), np.float32)
+    for a in range(0, len(rows), chunk):
+        out[a:a + chunk] = model.predict_proba(rows_matrix(feat_z, rows[a:a + chunk], cols))[:, 1]
+    return out
+
+
 def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, cfg, results, n_jobs=8):
+    """X_test 는 행렬이거나, 모델을 받아 테스트 점수를 돌려주는 함수 (lambda m: predict_rows(m, feat_z, test_idx, tree_cols)) — 03 부터 후자"""
     import lightgbm as lgb, xgboost as xgb
+    test_score = (lambda m: X_test(m)) if callable(X_test) else (lambda m: m.predict_proba(X_test)[:, 1])
     t0 = time.time()
     # max_delta_step: 잎 출력 상한 (최종 잎 값 ≤ lr × 0.7). 양성 0.1% + boost_from_average(초기 p≈0.006) 에서 순수 양성 잎의 잎 값이
     # −G/H ≈ 1/p ≈ 160 으로 폭주 → 트리 1개로 확률이 1.0 에 포화(검증 표본 2.7%, 그중 97% 양성)되고 AP 가 더 안 올라 best_iteration=1 로 끝났다.
@@ -278,7 +297,7 @@ def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, 
     lgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], eval_sample_weight=[w_val], eval_metric='average_precision',
                   callbacks=[lgb.early_stopping(cfg.tree_early_stop, first_metric_only=True, verbose=False)])  # AP 만 보고 멈춘다 (기본값은 logloss 도 같이 봐서 2라운드에 끊김)
     results['lightgbm'] = dict(val=evaluate_sample(val_df, lgb_model.predict_proba(X_val)[:, 1]),
-                               test=evaluate_sample(test_df, lgb_model.predict_proba(X_test)[:, 1]),
+                               test=evaluate_sample(test_df, test_score(lgb_model)),
                                best_iteration=int(lgb_model.best_iteration_ or cfg.tree_rounds), train_sec=round(time.time() - t0))
     log(f"lightgbm val AP {results['lightgbm']['val']['AP']:.4f}")
     t0 = time.time()
@@ -287,7 +306,7 @@ def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, 
                                   eval_metric='aucpr', early_stopping_rounds=cfg.tree_early_stop, random_state=cfg.seed, n_jobs=n_jobs)
     xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], sample_weight_eval_set=[w_val], verbose=False)
     results['xgboost'] = dict(val=evaluate_sample(val_df, xgb_model.predict_proba(X_val)[:, 1]),
-                              test=evaluate_sample(test_df, xgb_model.predict_proba(X_test)[:, 1]),
+                              test=evaluate_sample(test_df, test_score(xgb_model)),
                               best_iteration=int(xgb_model.best_iteration), train_sec=round(time.time() - t0))
     log(f"xgboost  val AP {results['xgboost']['val']['AP']:.4f}")
     return lgb_model, xgb_model
