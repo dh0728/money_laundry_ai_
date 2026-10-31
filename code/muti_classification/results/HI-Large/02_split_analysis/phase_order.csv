@@ -1,0 +1,9 @@
+﻿pattern_type,attempts,has_inter_%,inter_nodes,node_ordered_%,attempt_all_ordered_%,hub_inter_attempts,hub_in_span_d_med,hub_out_span_d_med,hub_gap_d_med,hub_gap_neg_%,hub_in_share_med
+FAN-OUT,2040,0.0,0,,,0,,,,,
+FAN-IN,2014,0.0,0,,,0,,,,,
+GATHER-SCATTER,2054,99.17,3111,34.2,34.32,2037,29.73,28.99,-0.05,54.59,0.458
+SCATTER-GATHER,2067,99.9,14107,91.71,63.78,687,0.0,0.0,-12.01,60.7,0.0
+CYCLE,2086,99.9,12336,80.12,0.0,2084,0.0,0.0,2.41,29.51,0.4
+RANDOM,2001,69.77,7617,95.83,91.05,1396,0.0,0.0,4.01,3.58,0.5
+BIPARTITE,2109,0.0,0,,,0,,,,,
+STACK,2096,99.81,12697,93.23,69.89,2092,0.0,0.0,9.92,14.15,0.5

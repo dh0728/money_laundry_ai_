@@ -1,3 +1,3 @@
-﻿config,train,val,test,n_train,min_train,unmatched_train%,n_val,min_val,unmatched_val%,n_test,min_test,unmatched_test%,cut_%,test_with_earlier%,truncated_%
-binary_same,2022-08-08~2022-10-02,2022-10-03~2022-10-16,2022-10-17~2022-10-30,110671,4948 (RANDOM),43.2,33795,1425 (RANDOM),40.5,34460,1335 (RANDOM),41.4,52.6,69.23,24.94
-longer_test,2022-08-08~2022-09-25,2022-09-26~2022-10-09,2022-10-10~2022-10-30,94309,4245 (RANDOM),43.7,33219,1416 (RANDOM),40.1,51398,2047 (RANDOM),41.3,56.71,60.23,24.94
+﻿config,train,val,test,n_train,min_train,unmatched_train%,n_val,min_val,unmatched_val%,n_test,min_test,unmatched_test%,cut_%,test_with_earlier%,test_in_train%,test_new%,truncated_%
+binary_same,2022-08-08~2022-10-02,2022-10-03~2022-10-16,2022-10-17~2022-10-30,110671,4948 (RANDOM),43.2,33795,1425 (RANDOM),40.5,34460,1335 (RANDOM),41.4,52.6,69.23,34.47,30.77,24.94
+longer_test,2022-08-08~2022-09-25,2022-09-26~2022-10-09,2022-10-10~2022-10-30,94309,4245 (RANDOM),43.7,33219,1416 (RANDOM),40.1,51398,2047 (RANDOM),41.3,56.71,60.23,27.71,39.77,24.94

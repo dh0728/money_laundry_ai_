@@ -1,0 +1,5 @@
+﻿kind,components,edges,edges_%
+unmatched_only,34849,46922,25.21
+single_attempt,9016,14781,7.94
+single_attempt+unm,2092,8423,4.53
+multi_attempt,1558,116006,62.32

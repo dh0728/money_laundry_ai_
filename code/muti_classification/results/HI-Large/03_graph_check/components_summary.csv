@@ -1,0 +1,12 @@
+﻿,0
+cutoff,2022-10-30
+edges,186132
+nodes,196430
+components,47515
+comp_edges_p50,1.0
+comp_edges_p90,3.0
+comp_edges_p99,13.0
+largest_edges,91813
+largest_nodes,73049
+largest_attempts,7943
+largest_edges_share_pct,49.33

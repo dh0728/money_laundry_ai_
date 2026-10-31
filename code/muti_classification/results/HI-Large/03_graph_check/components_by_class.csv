@@ -1,0 +1,10 @@
+﻿pattern_type,unmatched_only,single_attempt,single_attempt+unm,multi_attempt
+FAN-OUT,0.0,4.97,4.11,90.92
+FAN-IN,0.0,6.93,3.32,89.74
+GATHER-SCATTER,0.0,2.92,1.48,95.6
+SCATTER-GATHER,0.0,3.79,4.3,91.91
+CYCLE,0.0,9.62,4.68,85.7
+RANDOM,0.0,9.23,5.5,85.27
+BIPARTITE,0.0,43.33,7.93,48.74
+STACK,0.0,33.25,8.81,57.94
+UNMATCHED,57.81,0.0,3.91,38.28
