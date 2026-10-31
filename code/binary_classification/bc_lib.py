@@ -302,6 +302,98 @@ def predict_rows(model, feat_z, rows, cols, chunk=5_000_000):
     return out
 
 
+class _RowsSeq:
+    """memmap 피처 행렬의 (rows, cols) 부분을 LightGBM Sequence / XGBoost DataIter 가 묶음으로 읽게 하는 공통 뷰"""
+    batch_size = 2_000_000
+    dtype = np.float32          # LightGBM Sequence 는 float64 를 요구 (묶음 200만 × 24 × 8B = 384MB)
+
+    def __init__(self, feat_z, rows, cols):
+        self.F, self.rows, self.cols = feat_z, np.asarray(rows), list(cols)
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, idx):
+        import numbers
+        if isinstance(idx, numbers.Integral):
+            return self.F[self.rows[idx]][self.cols].astype(self.dtype)
+        if isinstance(idx, slice):
+            return rows_matrix(self.F, self.rows[idx], self.cols, dtype=self.dtype)
+        return rows_matrix(self.F, self.rows[np.asarray(idx)], self.cols, dtype=self.dtype)
+
+
+class _LGBBooster:
+    """lgb.train 결과를 LGBMClassifier 처럼 쓰기 위한 얇은 껍데기 (predict_proba, booster_, best_iteration_)"""
+    def __init__(self, booster):
+        self.booster_, self.best_iteration_ = booster, int(booster.best_iteration or 0)
+
+    def predict_proba(self, X):
+        p = self.booster_.predict(X, num_iteration=self.best_iteration_ or None)
+        return np.stack([1 - p, p], 1)
+
+
+class _XGBBooster:
+    """xgb.train 결과를 XGBClassifier 처럼 (predict_proba, get_booster, best_iteration)"""
+    def __init__(self, booster):
+        self._b, self.best_iteration = booster, int(getattr(booster, 'best_iteration', 0) or 0)
+
+    def get_booster(self):
+        return self._b
+
+    def predict_proba(self, X):
+        import xgboost as xgb
+        p = self._b.predict(xgb.DMatrix(X), iteration_range=(0, self.best_iteration + 1))
+        return np.stack([1 - p, p], 1)
+
+
+def train_trees_lowmem(feat_z, train_rows, tree_cols, y_train, X_val, y_val, w_val, test_pred, val_df, test_df, cfg, results, n_jobs=8):
+    """train_trees 와 같은 설정·같은 결과를 **X_train 을 만들지 않고** 학습한다 (04 에서 1억 × 24 float32 = 9.8GB 가 한도를 넘김).
+    LightGBM 은 Sequence 로 묶음 구성(내부엔 bin 만 남음, ~1 byte/값), XGBoost 는 DataIter 로 QuantileDMatrix 구성. 둘 다 memmap 을 순서대로 읽는다.
+    RSS 는 X_train 대신 bin 데이터 2~3GB 만 늘어난다"""
+    import lightgbm as lgb, xgboost as xgb
+    seq_cls = type('FeatSeq', (lgb.Sequence,), dict(__init__=_RowsSeq.__init__, __len__=_RowsSeq.__len__, __getitem__=_RowsSeq.__getitem__,
+                                                   batch_size=_RowsSeq.batch_size, dtype=np.float64))
+    lgb_params = dict(objective='binary', learning_rate=0.05, num_leaves=63, scale_pos_weight=cfg.scale_pos_weight, bagging_fraction=0.8, bagging_freq=1,
+                      feature_fraction=1.0, lambda_l2=1.0, min_sum_hessian_in_leaf=1.0, max_delta_step=0.7, seed=cfg.seed, num_threads=n_jobs, verbose=-1,
+                      metric='average_precision')
+    t0 = time.time()
+    dtrain = lgb.Dataset(seq_cls(feat_z, train_rows, tree_cols), label=np.asarray(y_train, np.float32), free_raw_data=True)
+    dval = lgb.Dataset(X_val, label=np.asarray(y_val, np.float32), weight=w_val, reference=dtrain)
+    booster = lgb.train(lgb_params, dtrain, num_boost_round=cfg.tree_rounds, valid_sets=[dval],
+                        callbacks=[lgb.early_stopping(cfg.tree_early_stop, first_metric_only=True, verbose=False)])
+    del dtrain, dval; gc.collect(); release_mmap(feat_z)
+    lgb_model = _LGBBooster(booster)
+    results['lightgbm'] = dict(val=evaluate_sample(val_df, lgb_model.predict_proba(X_val)[:, 1]), test=evaluate_sample(test_df, test_pred(lgb_model)),
+                               best_iteration=lgb_model.best_iteration_ or cfg.tree_rounds, train_sec=round(time.time() - t0))
+    log(f"lightgbm val AP {results['lightgbm']['val']['AP']:.4f}  (best_it {lgb_model.best_iteration_})"); trim('(lightgbm 후)')
+
+    class FeatIter(xgb.DataIter):
+        def __init__(self, view):
+            self.view, self.pos, self.y = view, 0, np.asarray(y_train, np.float32); super().__init__()
+
+        def next(self, input_data):
+            if self.pos >= len(self.view):
+                return 0
+            a, b = self.pos, min(self.pos + self.view.batch_size, len(self.view))
+            input_data(data=self.view[a:b], label=self.y[a:b]); self.pos = b
+            return 1
+
+        def reset(self):
+            self.pos = 0
+    t0 = time.time()
+    dtrain = xgb.QuantileDMatrix(FeatIter(_RowsSeq(feat_z, train_rows, tree_cols)), max_bin=256, nthread=n_jobs)
+    dval = xgb.DMatrix(X_val, label=y_val, weight=w_val, nthread=n_jobs)
+    xgb_params = dict(objective='binary:logistic', eta=0.05, max_depth=8, scale_pos_weight=cfg.scale_pos_weight, subsample=0.8, colsample_bytree=1.0,
+                      tree_method='hist', device='cpu', eval_metric='aucpr', seed=cfg.seed, nthread=n_jobs)
+    booster = xgb.train(xgb_params, dtrain, num_boost_round=cfg.tree_rounds, evals=[(dval, 'val')], early_stopping_rounds=cfg.tree_early_stop, verbose_eval=False)
+    del dtrain, dval; gc.collect(); release_mmap(feat_z)
+    xgb_model = _XGBBooster(booster)
+    results['xgboost'] = dict(val=evaluate_sample(val_df, xgb_model.predict_proba(X_val)[:, 1]), test=evaluate_sample(test_df, test_pred(xgb_model)),
+                              best_iteration=xgb_model.best_iteration, train_sec=round(time.time() - t0))
+    log(f"xgboost  val AP {results['xgboost']['val']['AP']:.4f}  (best_it {xgb_model.best_iteration})"); trim('(xgboost 후)')
+    return lgb_model, xgb_model
+
+
 def train_trees(X_train, y_train, X_val, y_val, w_val, X_test, val_df, test_df, cfg, results, n_jobs=8):
     """X_test 는 행렬이거나, 모델을 받아 테스트 점수를 돌려주는 함수 (lambda m: predict_rows(m, feat_z, test_idx, tree_cols)) — 03 부터 후자"""
     import lightgbm as lgb, xgboost as xgb

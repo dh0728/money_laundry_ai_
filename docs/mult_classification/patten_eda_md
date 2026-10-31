@@ -1,0 +1,76 @@
+# 패턴 데이터 분석 정리
+
+TRAIN = "2022-08-08" - "2022-10-02"
+VAL   = "2022-10-03" - "2022-10-16"
+TEST  = "2022-10-17" - "2022-10-30"
+
+## 1. 구간별 클래스 수
+
+### Edges 
+- 클래스 × 구간 엣지 수 (라벨 기준 1거래 1행). before = 학습 시작 전, after = 테스트 끝 뒤(11월 꼬리 포함)
+
+period	before	train	val	test	gap	after	total
+pattern_type							
+FAN-OUT	281	6045	1980	2131	0	3117	13554
+FAN-IN	215	6465	1897	1922	0	2788	13287
+GATHER-SCATTER	291	9012	3845	3785	0	9428	26361
+SCATTER-GATHER	285	12537	3909	3891	0	6356	26978
+CYCLE	229	6025	1765	1853	0	2468	12340
+RANDOM	159	4948	1425	1335	0	1751	9618
+BIPARTITE	180	6437	1730	1833	0	1994	12174
+STACK	155	11420	3549	3437	0	5063	23624
+UNMATCHED	5411	47782	13695	14273	0	6449	87610
+ALL	7206	110671	33795	34460	0	39414	225546
+
+### edges_share 
+- 각 구간 안에서 클래스 비율(%) — 구간마다 분포가 크게 다르면 검증·테스트 지표 해석에 주의
+
+period	train	val	test
+pattern_type			
+FAN-OUT	5.46	5.86	6.18
+FAN-IN	5.84	5.61	5.58
+GATHER-SCATTER	8.14	11.38	10.98
+SCATTER-GATHER	11.33	11.57	11.29
+CYCLE	5.44	5.22	5.38
+RANDOM	4.47	4.22	3.87
+BIPARTITE	5.82	5.12	5.32
+STACK	10.32	10.50	9.97
+UNMATCHED	43.17	40.52	41.42
+ALL	100.00	100.00	100.00
+
+
+### attempts_start 
+- 시도가 시작한 구간 기준 시도 수
+
+period	before	train	val	test	gap	after	total
+pattern_type							
+FAN-OUT	169	1120	326	291	0	134	2040
+FAN-IN	147	1160	288	285	0	134	2014
+GATHER-SCATTER	163	1186	303	277	0	125	2054
+SCATTER-GATHER	135	1189	304	297	0	142	2067
+CYCLE	150	1241	310	277	0	108	2086
+RANDOM	115	1179	306	278	0	123	2001
+BIPARTITE	76	1184	288	325	0	236	2109
+STACK	67	1172	303	324	0	230	2096
+ALL	1022	9431	2428	2354	0	1232	16467
+
+### attempts_touch
+- 그 구간에 거래가 1건이라도 있는 시도 수 (한 시도가 여러 열에 셈)
+
+period	before	train	val	test	gap	after
+pattern_type						
+FAN-OUT	169	1260	741	756	0	638
+FAN-IN	147	1275	725	730	0	569
+GATHER-SCATTER	163	1316	1149	1133	0	1086
+SCATTER-GATHER	135	1324	890	860	0	758
+CYCLE	150	1384	794	789	0	634
+RANDOM	115	1258	637	618	0	458
+BIPARTITE	76	1252	456	497	0	430
+STACK	67	1239	816	831	0	769
+
+## 2. 구간 경계에서 잘리는 시도
+- `cut` : 둘 이상 구간에 걸친 시도. `before|train` … `test|after` : 그 두 구간 모두에 거래가 있는 시도 수
+- `outside_share_med(cut)` : 걸친 시도에서 첫 구간 밖으로 나간 행 비율의 중앙값 (클수록 크게 잘림)
+- `edge_exposure` : 구간별 패턴 엣지 중 같은 시도가 앞 구간에도 있는 비율(`with_earlier_%`), 뒤 구간에도 있는 비율(`with_later_%`)
+  - train 의 `with_earlier_%` 는 before 구간 거래가 학습 그래프의 맥락으로 들어가므로 문제 아님
+  - **test 의 `with_earlier_%` = 누수 후보**, **train 의 `with_later_%` = 잘린 맥락으로 학습하는 비율**
