@@ -75,6 +75,7 @@ class Config:
     # GNN (Multi-GNN model_settings 'gin')
     num_neighbors: list = field(default_factory=lambda: [100, 100])
     batch_size: int = 2048
+    eval_batch_size: int = 8192       # 검증·테스트 추론 배치 (역전파 없음 → 크게. 결과 동일, 배치 수 1/4)
     iter_per_epoch: int = 256
     epochs: int = 400
     eval_period: int = 4
@@ -400,7 +401,8 @@ class GraphStore:
         return LinkNeighborLoader(
             graph, num_neighbors={TO: cfg.num_neighbors, REV: cfg.num_neighbors},
             edge_label_index=(TO, graph[TO].edge_index[:, targets]), edge_label=graph[TO].y[targets],
-            batch_size=cfg.batch_size, shuffle=shuffle, transform=AddEgoIdsAndTargetAttr(self.FEAT16, self.PORT_COLS, graph[TO].orig[targets]),
+            batch_size=cfg.batch_size if shuffle else cfg.eval_batch_size, shuffle=shuffle,
+            transform=AddEgoIdsAndTargetAttr(self.FEAT16, self.PORT_COLS, graph[TO].orig[targets]),
             is_sorted=True, num_workers=cfg.num_workers, persistent_workers=cfg.num_workers > 0)
 
     def use(self, name):
