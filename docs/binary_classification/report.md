@@ -91,10 +91,14 @@
 ## 03_account_activity.ipynb 결과 (HI-Large, 기본 4 + pair 4 + 계좌 활동 8, 2026-10-31)
 
 ### 설정
-- 추가 피처 8: 송신 계좌의 최근 1h/24h 송금 건수(`src_out_1h`, `src_out_1d`), 24h 상대 계좌 수(`src_uniq_dst_1d`, 일 단위 첫 거래 수로 근사), 24h 송금액 합(`src_out_amt_1d`); 수신 계좌 쪽 같은 4개(`dst_in_*`). 전부 ln(1+x), 거래 시각 기준 과거만(같은 분 제외). GNN 18열, 트리 16열
+- 추가 피처 8: 
+  - 송신 계좌의 최근 1h/24h 송금 건수(`src_out_1h`, `src_out_1d`)
+  - 24h 상대 계좌 수(`src_uniq_dst_1d`, 일 단위 첫 거래 수로 근사)
+  - 24h 송금액 합(`src_out_amt_1d`)
+  - 수신 계좌 쪽 같은 4개(`dst_in_*`)
+  전부 ln(1+x), 거래 시각 기준 과거만(같은 분 제외). GNN 18열, 트리 16열
 - 모델·학습 설정은 02 와 동일. GINe best 60 에폭(92 에서 조기 종료, 11.9 시간) — 02 의 112 보다 빨리 수렴
 - 트리: LightGBM best 352 라운드 26분, XGBoost 241 라운드 21분 (`max_delta_step=0.7` 적용 후 LightGBM 정상)
-- 메모리 (이번 단계에서 세 번 죽고 고친 것): 피처 parquet 은 tx 올리기 전에 생성 / tx 는 parquet 열 단위 적재(`load_tx_lowmem`) / 피처 float16 / z-norm 행렬은 디스크 memmap / 트리 입력은 행 묶음으로 채움(`rows_matrix`) / 테스트 예측은 묶음(`predict_rows`). RSS: 적재 14.2 → z-norm 후 6.5 → 트리 15.4 → 학습 12.8~18.7, 검증 교체 22.2, 테스트 21.0 (한도 25)
 
 ## 전체 (테스트, 02 → 03)
 
