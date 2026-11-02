@@ -502,7 +502,7 @@ class GraphStore:
         import torch
         if self.current['name'] == name:
             return self.current['loader']
-        self.current.update(name=None, graph=None, targets=None, loader=None); trim()
+        self.current.update(name=None, graph=None, targets=None, loader=None); release_mmap(self.FEAT16); trim()
         graph, targets = self.build_graph(self.N[name], self.rows[name])
         if name == 'train' and self.cfg.smoke:
             targets = targets[torch.randperm(len(targets))[:50_000]]
@@ -597,6 +597,22 @@ class InfiniteLoader:
             self.it = iter(self.loader); return next(self.it)
 
 
+def predict_store(model, store, name, cfg, device):
+    """store.use(name) 로 추론. CUDA OOM 이면 eval_batch_size 를 반으로 줄여 loader 를 다시 만들고 재시도 (결과는 배치 크기와 무관).
+    04 테스트에서 8192 배치 + 다른 프로세스가 GPU 11GB 점유 → OOM 으로 멈춘 뒤 추가"""
+    import torch
+    while True:
+        try:
+            return predict_loader(model, store.use(name), device)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if cfg.eval_batch_size <= 1024:
+                raise
+            cfg.eval_batch_size //= 2
+            store.current.update(name=None, graph=None, targets=None, loader=None); gc.collect()
+            log(f'CUDA OOM → eval_batch_size {cfg.eval_batch_size} 로 줄여 {name} 재시도')
+
+
 def predict_loader(model, loader, device):
     import torch, torch.nn.functional as F
     model.eval(); out = []
@@ -629,7 +645,7 @@ def train_gnn(name, store, cfg, val_df, out_dir, device, edge_updates=False, res
         row = dict(epoch=epoch, train_loss=float(np.mean(losses)), epoch_sec=round(time.time() - te))
         if epoch % cfg.eval_period == 0 or epoch == cfg.epochs:
             stream = None
-            m = evaluate_sample(val_df, predict_loader(model, store.use('val'), device)); row.update(m)
+            m = evaluate_sample(val_df, predict_store(model, store, 'val', cfg, device)); row.update(m)
             print(f"epoch {epoch:3d}  loss {row['train_loss']:.4f}  AP {m['AP']:.4f}  F1 {m['F1']:.4f}  F1@0.5 {m['F1_at_0.5']:.4f}  "
                   f"recall@1% {m['recall_at_1pct']:.4f}  ({time.time() - te:.0f}s)")
             if m['AP'] > best_ap:
@@ -663,7 +679,7 @@ def test_gnn(name, store, cfg, test_df, out_dir, device, edge_updates, results):
                              train_sec=int(hist['epoch_sec'].sum()), targets_seen=int(best['epoch']) * cfg.iter_per_epoch * cfg.batch_size, gpu_peak_gb=None)
     model = make_gine(store.edge_dim, cfg, edge_updates).to(device)
     model.load_state_dict(torch.load(out_dir / f'{name}.pt', map_location=device, weights_only=True))
-    t0 = time.time(); score = predict_loader(model, store.use('test'), device)
+    t0 = time.time(); score = predict_store(model, store, 'test', cfg, device)
     pd.DataFrame(dict(edge_id=test_df.edge_id, y=test_df.y, score=score)).to_parquet(out_dir / f'{name}_test_scores.parquet', index=False)
     results[name]['test'] = evaluate_sample(test_df, score)
     print(name, f'({(time.time()-t0)/60:.0f}분)', {k: round(v, 4) for k, v in results[name]['test'].items()})
