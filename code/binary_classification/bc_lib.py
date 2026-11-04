@@ -487,6 +487,13 @@ class GraphStore:
         log(f'그래프 to {m:,} + rev_to {m:,} 간선 (정렬됨)  {time.time()-t0:.0f}s')
         return data, targets
 
+    def features_to_gpu(self, device, chunk=20_000_000):
+        """피처 행렬(memmap/CPU)을 GPU float16 으로 옮긴다 (1.8억 × 26열 = 9.3GB). 이후 배치 변환이 GPU 에서 F[orig] 를 뽑아
+        호스트 RAM 한도(25GB)와 memmap 스래싱에서 벗어난다. V100 32GB 기준 추론 5GB + 피처 9GB. 현재 loader 는 버린다 (새 F 로 다시)"""
+        self.FEAT16 = load_feat_gpu(self.FEAT16, device, chunk)
+        self.current.update(name=None, graph=None, targets=None, loader=None); gc.collect()
+        return self.FEAT16
+
     def make_loader(self, graph, targets, shuffle):
         from torch_geometric.loader import LinkNeighborLoader
         cfg = self.cfg
@@ -511,6 +518,20 @@ class GraphStore:
         return loader
 
 
+def load_feat_gpu(feat, device, chunk=20_000_000):
+    """numpy memmap / 배열 / CPU 텐서 → GPU float16 텐서. 2천만 행씩 옮겨 호스트 임시 메모리를 작게 유지"""
+    import torch
+    if isinstance(feat, torch.Tensor):
+        return feat.to(device=device, dtype=torch.float16)
+    t0 = time.time(); n = len(feat)
+    out = torch.empty((n, feat.shape[1]), dtype=torch.float16, device=device)
+    for a in range(0, n, chunk):
+        out[a:a + chunk] = torch.from_numpy(np.ascontiguousarray(feat[a:a + chunk], dtype=np.float16)).to(device)
+    release_mmap(feat)
+    log(f'피처 행렬 → {device} float16 {tuple(out.shape)} ({out.numel() * 2 / 1e9:.1f}GB, {time.time()-t0:.0f}s)')
+    return out
+
+
 class AddEgoIdsAndTargetAttr:
     """배치 변환
     1) ego ID 열을 x 에 붙임
@@ -521,10 +542,11 @@ class AddEgoIdsAndTargetAttr:
         self.F, self.port_cols, self.target_rows = feat16, list(port_cols), target_rows
 
     def rows(self, idx):
-        """F[idx] 를 float32 텐서로. F 가 torch 텐서(RAM)든 numpy memmap(디스크)이든 같은 결과"""
+        """F[idx] 를 float32 텐서로. F 가 torch 텐서(RAM 또는 GPU)든 numpy memmap(디스크)이든 같은 결과.
+        GPU 텐서면 인덱스를 GPU 로 보내 거기서 뽑는다 (호스트 memmap 을 안 읽음 — 04 테스트에서 memmap 스래싱으로 멈춘 뒤 추가)"""
         import torch
         if isinstance(self.F, torch.Tensor):
-            return self.F[idx.long()].float()
+            return self.F[idx.long().to(self.F.device)].float()
         return torch.from_numpy(self.F[idx.numpy()].astype(np.float32))
 
     def __call__(self, batch):
