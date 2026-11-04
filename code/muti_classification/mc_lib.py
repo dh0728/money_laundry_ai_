@@ -505,7 +505,8 @@ def components(lau: pd.DataFrame, cutoff) -> dict:
                 kind = unmatched_only / single_attempt(시도 1개 + UNMATCHED 0) / single_attempt+unm / multi_attempt
     summary   : 요소 수, 크기 분위, 가장 큰 요소, 종류별 요소 수·엣지 비율
     by_pattern: 패턴별 시도 중 '자기 요소에 다른 시도가 있음' / 'UNMATCHED 가 섞임' 비율, 요소 엣지 수 중앙값
-    by_class  : 클래스별 엣지가 어떤 종류 요소에 있나 (%)"""
+    by_class  : 클래스별 엣지가 어떤 종류 요소에 있나 (%)
+    edges     : 엣지별 요소 번호·종류·요소 크기 (04 점검용)"""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
     v = lau[lau["ts"] < end_of(cutoff)].copy()
@@ -542,7 +543,8 @@ def components(lau: pd.DataFrame, cutoff) -> dict:
     bp = bp.rename(columns={"shares_comp_with_other_attempt": "other_attempt_in_comp_%", "comp_has_unmatched": "unmatched_in_comp_%"})
     v = v.join(comp["kind"], on="comp")
     bc = (pd.crosstab(v["pattern_type"], v["kind"], normalize="index") * 100).reindex(index=CLASSES, columns=kinds).fillna(0).round(2)
-    return dict(comp=comp, summary=pd.Series(summary), kinds=k, by_pattern=bp, by_class=bc)
+    edges = v[["edge_id", "pattern_type", "comp", "kind"]].join(comp["n_edges"].rename("comp_edges"), on="comp")
+    return dict(comp=comp, summary=pd.Series(summary), kinds=k, by_pattern=bp, by_class=bc, edges=edges)
 
 
 def shared_accounts(lau: pd.DataFrame, cutoff=None) -> dict:
@@ -567,6 +569,170 @@ def shared_accounts(lau: pd.DataFrame, cutoff=None) -> dict:
     for c in ["shared_%", "shared_other_type_%", "has_unmatched_account_%"]:
         bp[c] = (bp[c] * 100).round(2)
     return dict(accounts=acc, by_pattern=bp.reindex(PATTERNS))
+
+
+# ============================================================================ 3e. 0단계 남은 점검 (04 노트북)
+def _pattern_edges(lau):
+    p = lau[lau["attempt_id"].notna()].copy()
+    p["attempt_id"] = p["attempt_id"].astype(np.int64)
+    p["pattern_type"] = p["pattern_type"].astype(str)
+    return p
+
+
+def small_attempts(lau: pd.DataFrame, att: pd.DataFrame, windows: dict, max_edges: int = 2) -> dict:
+    """① 엣지 1~2개짜리 작은 시도.
+    attempts : 패턴별 시도 중 전체 엣지 수 1개 / 2개 / ≤max_edges 비율(%) (시도 전체 기준, n_edges)
+    edges    : 분할 × 패턴 엣지 중
+               full_le_%    = 시도 전체가 엣지 ≤max_edges 개인 엣지 비율 (끝까지 가도 구조가 없음)
+               visible_le_% = 분할 끝까지 보이는 시도 엣지가 ≤max_edges 개인 엣지 비율 (그 시점 그래프에서 구조가 없음)
+               visible_1_%  = 분할 끝까지 보이는 시도 엣지가 1개 (자기 자신뿐)"""
+    a = att[["attempt_id", "pattern_type", "n_edges"]].copy()
+    a["pattern_type"] = a["pattern_type"].astype(str)
+    t = a.groupby("pattern_type").agg(attempts=("n_edges", "size"),
+                                       **{"edges1_%": ("n_edges", lambda x: (x == 1).mean() * 100),
+                                          "edges2_%": ("n_edges", lambda x: (x == 2).mean() * 100),
+                                          f"le{max_edges}_%": ("n_edges", lambda x: (x <= max_edges).mean() * 100)})
+    t = t.round(2).reindex(PATTERNS)
+
+    p = _pattern_edges(lau)
+    p = p.join(a.set_index("attempt_id")["n_edges"], on="attempt_id")
+    p["period"] = assign_period(p["ts"], windows)
+    rows = []
+    for s in SPLITS:
+        end = windows[s][1]
+        vis = p[p["ts"] < end].groupby("attempt_id").size()
+        q = p[p["period"] == s].copy()
+        q["visible"] = q["attempt_id"].map(vis)
+        g = q.groupby("pattern_type").agg(n=("ts", "size"),
+                                          **{"full_le_%": ("n_edges", lambda x: (x <= max_edges).mean() * 100),
+                                             "visible_le_%": ("visible", lambda x: (x <= max_edges).mean() * 100),
+                                             "visible_1_%": ("visible", lambda x: (x == 1).mean() * 100)})
+        rows.append(g.round(2).reindex(PATTERNS).assign(split=s))
+    edges = pd.concat(rows).reset_index().set_index(["split", "pattern_type"])
+    return dict(attempts=t, edges=edges)
+
+
+def cycle_closure(lau: pd.DataFrame, att: pd.DataFrame, windows: dict) -> dict:
+    """② CYCLE 이 분할 끝까지 닫혔나. 닫히기 전 CYCLE 은 경로라 RANDOM 처럼 보인다.
+    shape  : 가정 확인 — CYCLE 은 엣지 수 = 계좌 수(단순 사이클), RANDOM 은 엣지 수 = 계좌 수 − 1(경로) 인 시도 비율
+             이 가정이 맞으면 '시도 엣지가 전부 보이면 닫힘' 으로 판단할 수 있다
+    closed : 분할별 CYCLE 엣지 중 그 시도가 분할 끝까지 닫힌 비율 (= 시도 마지막 엣지가 분할 끝 이전)
+             open_% 은 테스트 그래프에서 RANDOM 과 구조가 같은 CYCLE 엣지 → 하한 표의 CYCLE→RANDOM 칸"""
+    a = att.copy()
+    a["pattern_type"] = a["pattern_type"].astype(str)
+    shape = pd.DataFrame({
+        "attempts": a.groupby("pattern_type").size(),
+        "edges_eq_accounts_%": a.groupby("pattern_type").apply(lambda d: (d["n_edges"] == d["n_accounts"]).mean() * 100),
+        "edges_eq_accounts-1_%": a.groupby("pattern_type").apply(lambda d: (d["n_edges"] == d["n_accounts"] - 1).mean() * 100),
+    }).round(2).reindex(["CYCLE", "RANDOM"])
+    p = _pattern_edges(lau)
+    p = p[p["pattern_type"] == "CYCLE"].join(a.set_index("attempt_id")["end_ts"], on="attempt_id")
+    p["period"] = assign_period(p["ts"], windows)
+    rows = []
+    for s in SPLITS:
+        q = p[p["period"] == s]
+        closed = q["end_ts"] < windows[s][1]
+        rows.append(dict(split=s, n=len(q), closed_pct=round(closed.mean() * 100, 2), open_pct=round((~closed).mean() * 100, 2)))
+    return dict(shape=shape, closed=pd.DataFrame(rows).set_index("split").rename(columns={"closed_pct": "closed_%", "open_pct": "open_%"}))
+
+
+def new_attempt_sharing(lau: pd.DataFrame, att: pd.DataFrame, windows: dict) -> dict:
+    """③ 그 분할에서 새로 시작한 시도(new)가 학습 구간 세탁 거래와 계좌를 공유하나.
+    학습 라벨 계좌 = 학습 구간 세탁 엣지(패턴 + UNMATCHED)의 양끝 계좌
+    attempts : 분할 × 패턴 new 시도 중 학습 라벨 계좌를 하나라도 포함 / 학습 '패턴' 엣지 계좌를 포함 비율(%)
+    edges    : 분할 × 클래스 엣지 중 양끝 중 하나가 학습 라벨 계좌인 비율(%) — new 패턴 엣지, UNMATCHED 엣지 각각"""
+    tr0, tr1 = windows["train"]
+    tr = lau[(lau["ts"] >= tr0) & (lau["ts"] < tr1)]
+    tr_all = set(np.concatenate([tr["src"].to_numpy(), tr["dst"].to_numpy()]))
+    trp = tr[tr["pattern_type"] != UNMATCHED]
+    tr_pat = set(np.concatenate([trp["src"].to_numpy(), trp["dst"].to_numpy()]))
+    start = att.set_index("attempt_id")["start_ts"]
+    rows_a, rows_e = [], []
+    for s in ["val", "test"]:
+        a0, a1 = windows[s]
+        q = lau[(lau["ts"] >= a0) & (lau["ts"] < a1)].copy()
+        q["touch_train"] = q["src"].isin(tr_all) | q["dst"].isin(tr_all)
+        q["touch_train_pat"] = q["src"].isin(tr_pat) | q["dst"].isin(tr_pat)
+        pat = q[q["attempt_id"].notna()].copy()
+        pat["attempt_id"] = pat["attempt_id"].astype(np.int64)
+        pat["start_ts"] = pat["attempt_id"].map(start)
+        new = pat[pat["start_ts"] >= a0]
+        g = new.groupby("attempt_id").agg(pattern_type=("pattern_type", "first"), any_train=("touch_train", "any"),
+                                          any_train_pat=("touch_train_pat", "any"))
+        g["pattern_type"] = g["pattern_type"].astype(str)
+        ra = g.groupby("pattern_type").agg(new_attempts=("any_train", "size"), **{"share_train_acct_%": ("any_train", "mean"),
+                                                                                    "share_train_pattern_acct_%": ("any_train_pat", "mean")})
+        ra[["share_train_acct_%", "share_train_pattern_acct_%"]] *= 100
+        rows_a.append(ra.round(2).reindex(PATTERNS).assign(split=s))
+        e = pd.concat([new.assign(group="new_pattern"), q[q["pattern_type"] == UNMATCHED].assign(group="unmatched")])
+        e["pattern_type"] = e["pattern_type"].astype(str)
+        re_ = e.groupby(["group", "pattern_type"]).agg(n=("ts", "size"), **{"touch_train_acct_%": ("touch_train", "mean")})
+        re_["touch_train_acct_%"] = (re_["touch_train_acct_%"] * 100).round(2)
+        rows_e.append(re_.assign(split=s))
+    attempts = pd.concat(rows_a).reset_index().set_index(["split", "pattern_type"])
+    edges = pd.concat(rows_e).reset_index().set_index(["split", "group", "pattern_type"])
+    return dict(attempts=attempts, edges=edges)
+
+
+COMP_SIZE_BINS = [0, 1, 2, 3, 5, 10, 50, 1000, np.inf]
+COMP_SIZE_LABELS = ["1", "2", "3", "4-5", "6-10", "11-50", "51-1000", "1000+"]
+
+
+def unmatched_component_sizes(comp_edges: pd.DataFrame) -> dict:
+    """④ UNMATCHED 엣지가 속한 연결 요소의 크기(엣지 수). comp_edges = components(...)['edges'].
+    counts : 요소 크기 구간 × 요소 종류 → UNMATCHED 엣지 수
+    share  : 같은 표를 UNMATCHED 엣지 전체 대비 %"""
+    u = comp_edges[comp_edges["pattern_type"] == UNMATCHED]
+    size = pd.cut(u["comp_edges"], COMP_SIZE_BINS, labels=COMP_SIZE_LABELS)
+    kinds = ["unmatched_only", "single_attempt+unm", "multi_attempt"]
+    c = pd.crosstab(size, u["kind"]).reindex(index=COMP_SIZE_LABELS, columns=kinds).fillna(0).astype(int)
+    c["total"] = c.sum(axis=1)
+    c.loc["ALL"] = c.sum()
+    share = (c / len(u) * 100).round(2)
+    return dict(counts=c.rename_axis(index="comp_edges", columns=None), share=share.rename_axis(index="comp_edges", columns=None))
+
+
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def weekday_hour(lau: pd.DataFrame, windows: dict, daily: pd.DataFrame | None = None) -> dict:
+    """⑤ 요일·시간대별 클래스 분포 (학습~테스트 구간, 10/30 까지).
+    weekday : 클래스 × 요일 비율(%) (행 합 100). 정상 거래(daily_all 의 n_normal) 행도 같이 — 주간 주기가 정상과 닮았나
+    weekday_ratio : weekday 를 균등(14.29%) 대비 배수로 — 1 에서 멀수록 요일 신호
+    hour    : 클래스 × 시간대(0~23) 비율(%)"""
+    a = windows["train"][0]; b = windows["test"][1]
+    q = lau[(lau["ts"] >= a) & (lau["ts"] < b)].copy()
+    q["pattern_type"] = q["pattern_type"].astype(str)
+    q["wd"] = q["ts"].dt.dayofweek
+    q["hour"] = q["ts"].dt.hour
+    wd = pd.crosstab(q["pattern_type"], q["wd"], normalize="index").reindex(index=CLASSES, columns=range(7)).fillna(0) * 100
+    wd.columns = WEEKDAYS
+    if daily is not None:
+        d = daily[(daily.index >= a) & (daily.index < b)]
+        nw = d.groupby(d.index.dayofweek)["n_normal"].sum()
+        wd.loc["NORMAL(all tx)"] = (nw / nw.sum() * 100).reindex(range(7)).to_numpy()
+    wd = wd.round(2)
+    ratio = (wd / (100 / 7)).round(2)
+    hr = (pd.crosstab(q["pattern_type"], q["hour"], normalize="index").reindex(index=CLASSES, columns=range(24)).fillna(0) * 100).round(2)
+    return dict(weekday=wd, weekday_ratio=ratio, hour=hr)
+
+
+def plot_weekday_hour(wh: dict, path=None):
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+    for c in wh["weekday"].index:
+        style = dict(color="black", lw=2.5) if c.startswith("NORMAL") else (dict(color="#D62728", lw=2.5) if c == UNMATCHED else dict(lw=1, alpha=0.8))
+        axes[0].plot(WEEKDAYS, wh["weekday"].loc[c].to_numpy(), marker="o", ms=3, label=c, **style)
+    axes[0].axhline(100 / 7, color="gray", ls="--", lw=1)
+    axes[0].set_title("share by weekday (%)  — dashed = uniform"); axes[0].legend(fontsize=7, ncol=2)
+    for c in wh["hour"].index:
+        style = dict(color="#D62728", lw=2.5) if c == UNMATCHED else dict(lw=1, alpha=0.8)
+        axes[1].plot(range(24), wh["hour"].loc[c].to_numpy(), label=c, **style)
+    axes[1].set_title("share by hour (%)"); axes[1].set_xticks(range(0, 24, 2))
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=110)
+    return fig
 
 
 # ============================================================================ 4. 여러 분할 비교
