@@ -1,0 +1,10 @@
+
+==== 2026-11-10 06:01:21 bench threads=8 cycle_tw=86400 lc_len=6 tag=''
+
+==== 2026-11-10 06:04:43 bench threads=8 cycle_tw=21600 lc_len=6 tag=''
+
+==== 2026-11-10 06:04:54 bench threads=8 cycle_tw=21600 lc_len=4 tag=''
+
+==== 2026-11-10 06:05:04 bench threads=1 cycle_tw=86400 lc_len=6 tag=''
+워밍업 완료 (1,500,000 건)  RSS 1.5GB
+06:06:03 edge_id 4000001 call 0/91 batch 163 3,101 rows/s RSS 1.5GB
