@@ -11,6 +11,9 @@
   --cycle-tw SEC     temp-cycle / lc-cycle 시간 창 (기본 86400). 6시간 = 21600
   --lc-len K         lc-cycle 최대 길이 (기본 6)
   --tag NAME         출력 폴더 접미사 (설정을 바꿔 돌릴 때 part 가 섞이지 않게). 기본 ''
+  --tw SEC           전체 time_window 와 fan/degree 창 (기본 86400)
+  --no-vs            vertex stats 끄기 (속도 비교용)
+자기 루프(src == dst) 는 GFP 입력에서 뺀다 — 창 밖 삭제 때 'Edge does not exist' 로 크래시하는 원인이고 모티프에도 무의미. 그 행의 피처는 0
 """
 import argparse, faulthandler, gc, sys, time
 from pathlib import Path
@@ -31,12 +34,12 @@ FAN_ORDER = ('in', 'out')            # 05 노트북 1절에서 확인한 순서
 VS_FEATS = ['fan', 'deg', 'ratio', 'avg', 'sum', 'min', 'max']
 
 
-def gfp_params(threads, cycle_tw, lc_len):
+def gfp_params(threads, cycle_tw, lc_len, tw=DAY, vs=True):
     return {
-        'num_threads': threads, 'time_window': DAY,
-        'vertex_stats': True, 'vertex_stats_cols': [4], 'vertex_stats_feats': [0, 1, 2, 3, 4, 5, 6],
-        'fan': True, 'fan_tw': DAY, 'fan_bins': [2, 3, 4, 5, 6, 8, 10, 15],
-        'degree': True, 'degree_tw': DAY, 'degree_bins': [2, 3, 4, 5, 6, 8, 10, 15],
+        'num_threads': threads, 'time_window': tw,
+        'vertex_stats': vs, 'vertex_stats_cols': [4], 'vertex_stats_feats': [0, 1, 2, 3, 4, 5, 6],
+        'fan': True, 'fan_tw': tw, 'fan_bins': [2, 3, 4, 5, 6, 8, 10, 15],
+        'degree': True, 'degree_tw': tw, 'degree_bins': [2, 3, 4, 5, 6, 8, 10, 15],
         'scatter-gather': True, 'scatter-gather_tw': 6 * 3600, 'scatter-gather_bins': [2, 3, 4, 6, 8],
         'temp-cycle': True, 'temp-cycle_tw': cycle_tw, 'temp-cycle_bins': [2, 3, 4, 5, 6],
         'lc-cycle': True, 'lc-cycle_tw': cycle_tw, 'lc-cycle_len': lc_len, 'lc-cycle_bins': [2, 3, 4, 5, 6],
@@ -51,6 +54,8 @@ def gfp_names(p):
             tag = 'fan' if k == 'fan' else 'deg'; nb = len(p[f'{k}_bins'])
             names += [f'gfp_{tag}_{FAN_ORDER[0]}_b{i}' for i in range(nb)] + [f'gfp_{tag}_{FAN_ORDER[1]}_b{i}' for i in range(nb)]
         elif k == 'vertex_stats':
+            if not p['vertex_stats']:
+                continue
             for f in p['vertex_stats_feats']:
                 names += [f'gfp_vs_{VS_FEATS[f]}_{j}' for j in range(4)]
         else:
@@ -77,15 +82,17 @@ def iter_chunks(pf, cols, start_row=0, n_rows=None, chunk=READ_CHUNK):
 
 
 def transform_by_minute(gp, X, fitted, n_feat, log=None, log_every=50):
-    ts = X[:, 3]; assert (np.diff(ts) >= 0).all(), '시간순 아님'
-    bounds = np.flatnonzero(np.diff(ts) != 0) + 1; starts = np.r_[0, bounds]; ends = np.r_[bounds, len(X)]
-    out = np.empty((len(X), n_feat), np.float64); t0 = time.time()
+    """X 를 같은 timestamp 묶음으로 잘라 순서대로 transform. 자기 루프(src == dst) 는 입력에서 빼고 피처 0 으로 둔다"""
+    out = np.zeros((len(X), n_feat), np.float64); t0 = time.time()
+    keep = np.flatnonzero(X[:, 1] != X[:, 2]); Xk = X[keep]
+    ts = Xk[:, 3]; assert (np.diff(ts) >= 0).all(), '시간순 아님'
+    bounds = np.flatnonzero(np.diff(ts) != 0) + 1; starts = np.r_[0, bounds]; ends = np.r_[bounds, len(Xk)]
     for k, (s, e) in enumerate(zip(starts, ends)):
-        res = gp.transform(X[s:e]) if fitted else gp.fit_transform(X[s:e]); fitted = True
-        out[s:e] = res[:, X.shape[1]:]
+        res = gp.transform(Xk[s:e]) if fitted else gp.fit_transform(Xk[s:e]); fitted = True
+        out[keep[s:e]] = res[:, X.shape[1]:]
         if log is not None and k % log_every == 0:
             rate = e / max(time.time() - t0, 1e-9)
-            log.write(f'{time.strftime("%H:%M:%S")} edge_id {int(X[s, 0])} call {k}/{len(starts)} batch {e - s} '
+            log.write(f'{time.strftime("%H:%M:%S")} edge_id {int(Xk[s, 0])} call {k}/{len(starts)} batch {e - s} '
                       f'{rate:,.0f} rows/s RSS {psutil.Process().memory_info().rss / 1e9:.1f}GB\n'); log.flush()
     return out, fitted, len(starts)
 
@@ -97,6 +104,8 @@ def main():
     ap.add_argument('--cycle-tw', type=int, default=DAY)
     ap.add_argument('--lc-len', type=int, default=6)
     ap.add_argument('--tag', default='')
+    ap.add_argument('--tw', type=int, default=DAY, help='전체 time_window 와 fan/degree 창')
+    ap.add_argument('--no-vs', action='store_true', help='vertex stats 끄기')
     ap.add_argument('--start', type=int, default=4_000_000, help='bench: 시작 행')
     ap.add_argument('--rows', type=int, default=600_000, help='bench: 측정 행 수 (워밍업 150만 건 뒤)')
     a = ap.parse_args()
@@ -105,11 +114,11 @@ def main():
     cfg = B.Config(dataset='HI-Large', smoke=False)
     out_dir = cfg.out_dir('gfp')
     chunk_dir = cfg.feat_dir / ('gfp_chunks' + (f'_{a.tag}' if a.tag else '')); chunk_dir.mkdir(exist_ok=True)
-    params = gfp_params(a.threads, a.cycle_tw, a.lc_len); names = gfp_names(params)
+    params = gfp_params(a.threads, a.cycle_tw, a.lc_len, a.tw, not a.no_vs); names = gfp_names(params)
     pf = pq.ParquetFile(cfg.feat_dir / 'tx_base.parquet'); cols = ['edge_id', 'src', 'dst', 'timestamp', 'amount_received']
     n_total = pf.metadata.num_rows
     log = open(out_dir / f'gfp_{a.mode}{"_" + a.tag if a.tag else ""}.log', 'a')
-    log.write(f'\n==== {time.strftime("%Y-%m-%d %H:%M:%S")} {a.mode} threads={a.threads} cycle_tw={a.cycle_tw} lc_len={a.lc_len} tag={a.tag!r}\n'); log.flush()
+    log.write(f'\n==== {time.strftime("%Y-%m-%d %H:%M:%S")} {a.mode} threads={a.threads} tw={a.tw} cycle_tw={a.cycle_tw} lc_len={a.lc_len} vs={not a.no_vs} tag={a.tag!r} 열={len(names)}\n'); log.flush()
     print('로그:', log.name, flush=True)
 
     gp = GraphFeaturePreprocessor(); gp.set_params(params); fitted = False
@@ -124,7 +133,7 @@ def main():
         for X in iter_chunks(pf, cols, a.start, a.rows, chunk=min(READ_CHUNK, a.rows)):
             feat, fitted, n_calls = transform_by_minute(gp, X, fitted, len(names), log); n += len(X)
         dt = time.time() - t0
-        msg = f'BENCH threads={a.threads} cycle_tw={a.cycle_tw} lc_len={a.lc_len}: {n:,} 건 {dt:.0f}s → {n / dt:,.0f} 건/s → 전체 {n_total / (n / dt) / 3600:.1f} 시간  RSS {psutil.Process().memory_info().rss / 1e9:.1f}GB'
+        msg = f'BENCH threads={a.threads} tw={a.tw} cycle_tw={a.cycle_tw} lc_len={a.lc_len} vs={not a.no_vs}: {n:,} 건 {dt:.0f}s → {n / dt:,.0f} 건/s → 전체 {n_total / (n / dt) / 3600:.1f} 시간  RSS {psutil.Process().memory_info().rss / 1e9:.1f}GB'
         log.write(msg + '\n'); print(msg, flush=True); return
 
     n_parts = (n_total + READ_CHUNK - 1) // READ_CHUNK
