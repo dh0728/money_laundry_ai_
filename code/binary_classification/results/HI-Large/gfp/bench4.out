@@ -1,1 +1,3 @@
 로그: /workspace/money_laundry_ai_/code/binary_classification/results/HI-Large/gfp/gfp_bench.log
+로그: /workspace/money_laundry_ai_/code/binary_classification/results/HI-Large/gfp/gfp_bench.log
+BENCH threads=1 cycle_tw=86400 lc_len=6: 600,000 건 245s → 2,446 건/s → 전체 20.4 시간  RSS 2.0GB
