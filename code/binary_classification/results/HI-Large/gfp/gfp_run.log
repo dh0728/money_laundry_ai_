@@ -1,0 +1,23 @@
+
+==== 2026-11-10 06:05:40 run threads=8 cycle_tw=86400 lc_len=6 tag=''
+part 90개, 완료 2개
+
+==== 2026-11-10 06:42:32 run threads=8 cycle_tw=86400 lc_len=6 tag=''
+part 90개, 완료 2개
+워밍업 완료 (1,500,000 건)
+06:46:45 edge_id 4000001 call 0/1342 batch 163 14,709 rows/s RSS 1.6GB
+06:47:22 edge_id 4110459 call 50/1342 batch 2219 3,027 rows/s RSS 1.8GB
+06:48:05 edge_id 4222657 call 100/1342 batch 2245 2,832 rows/s RSS 1.9GB
+06:48:49 edge_id 4334662 call 150/1342 batch 2210 2,716 rows/s RSS 2.0GB
+06:49:35 edge_id 4446473 call 200/1342 batch 2268 2,641 rows/s RSS 2.2GB
+06:50:19 edge_id 4578861 call 250/1342 batch 1330 2,720 rows/s RSS 2.3GB
+06:50:56 edge_id 4644362 call 300/1342 batch 1280 2,571 rows/s RSS 2.4GB
+06:51:35 edge_id 4709679 call 350/1342 batch 1393 2,454 rows/s RSS 2.4GB
+06:52:14 edge_id 4774719 call 400/1342 batch 1303 2,364 rows/s RSS 2.5GB
+06:52:55 edge_id 4840194 call 450/1342 batch 1295 2,277 rows/s RSS 2.5GB
+06:53:37 edge_id 4905570 call 500/1342 batch 1314 2,202 rows/s RSS 2.6GB
+06:54:19 edge_id 4970925 call 550/1342 batch 1289 2,143 rows/s RSS 2.6GB
+06:55:05 edge_id 5035966 call 600/1342 batch 1277 2,075 rows/s RSS 2.7GB
+06:55:51 edge_id 5101189 call 650/1342 batch 1319 2,019 rows/s RSS 2.8GB
+06:56:38 edge_id 5166228 call 700/1342 batch 1307 1,971 rows/s RSS 2.8GB
+06:57:28 edge_id 5231777 call 750/1342 batch 1267 1,918 rows/s RSS 2.9GB

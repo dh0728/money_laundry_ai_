@@ -94,6 +94,19 @@
 - 계산: 1.8억 건을 시각순 배치로 흘려 parquet 에 이어 쓰기 (별도 노트북). 비용이 커서 마지막
 - 기대는 낮게: GFP·BlazingAML 모두 트리 모델에서 +1~4p. GNN 에서 다를지 확인
 
+### 06 계좌 이력 · 평소 대비 (account history) — 03 위에, 04 는 제외
+- 노리는 패턴: UNMATCHED (패턴 없는 세탁, 양성의 41%). 03 까지 패턴 피처를 더할수록 오히려 내려가던 것
+- 피처: v10 채택 41종 중 정상 vs 무패턴 분리도가 높았던 묶음을 우리 규칙(과거만) 으로 재정의. 송신·수신 각 6: 전날까지 누적 건수·상대 수·활동 일수, 24h 건수 vs 과거 일평균(`rate_vs_prior`), 같은 분 집중도(`minute_burst`), 직전 거래 간격. `amount_seen`(과거 동일 금액 여부) 은 계산만 하고 제외 — 데이터 생성 규칙 의존 의심
+- 계산: 일 단위 계좌 상태 + ASOF(전날까지) 와 창 함수. 1.8억 행 테이블 넷을 한 번에 조인하면 DuckDB 12GB 초과 → src/dst 한쪽씩 피처 테이블을 만든 뒤 둘만 조인
+- 기대: 이력 짧은 계좌·갑자기 활발한 계좌가 무패턴 세탁이라면 UNMATCHED recall 이 오른다. 결과는 report.md
+
+### 07 트리 피처 조건 비교 (tree ablations) — GNN 없음
+- 노리는 것: 06 에서 트리가 GINe 를 넘었으므로 서비스용 피처 셋은 트리로 결정. 조건당 트리 2개 80분
+- 조건: `base06`(06 재현) / `amtseen`(+과거 동일 금액 2) / `no_pf`(−payment_format, 지름길 제거) / `tod`(−timestamp +시간대 3 — 절대 시각은 학습 구간 밖으로 외삽되고 서비스에서 못 씀)
+- 계산: 33열 z-norm memmap 한 번, 조건은 열 부분집합. `train_trees_lowmem` 으로 X_train 없이 학습
+- 기대: `tod ≈ base06` 이면 시간대 교체 채택. `amtseen` 은 효과가 커도 일반화 위험 분리. `no_pf` 의 하락 폭 = 결제수단 지름길의 몫 (정직한 성능)
+
+
 ### 1단계 산출물
 - 단계별 전체 AP / 패턴별 recall / degree 구간 표를 한 표로 누적 (`docs/binary_classification/feature_ladder.md`)
 - 최종 피처 세트 = 패턴 recall 을 올린 단계만 누적한 것
