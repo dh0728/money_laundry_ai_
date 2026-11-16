@@ -86,6 +86,7 @@ class Config:
     lr: float = 0.006
     dropout: float = 0.01
     final_dropout: float = 0.1
+    heads: int = 4                    # attention 계열(GAT · TransConv · SALT) 머리 수 (2단계)
     num_workers: int = 0
     seed: int = 42
 
@@ -600,6 +601,14 @@ def make_gine(edge_dim, cfg, edge_updates):
     return GINe(2, edge_dim, cfg.n_hidden, cfg.n_gnn_layers, edge_updates=edge_updates, dropout=cfg.dropout, final_dropout=cfg.final_dropout)
 
 
+def make_model(kind, edge_dim, cfg, edge_updates=False, store=None):
+    """2단계 모델 선택. 'gine' / 'gine128' 은 1단계와 같은 make_gine (hidden 은 cfg.n_hidden), 나머지는 bc_models (PNA · GAT · TransConv · SALT-Trans)"""
+    if kind in ('gine', 'gine128'):
+        return make_gine(edge_dim, cfg, edge_updates)
+    import bc_models
+    return bc_models.make_model(kind, edge_dim, cfg, store)
+
+
 def forward_batch(model, batch, device):
     batch = batch.to(device)
     logits = model(batch['node'].x, {'fwd': batch[TO].edge_index, 'rev': batch[REV].edge_index},
@@ -646,12 +655,12 @@ def predict_loader(model, loader, device):
 
 
 # ============================================================================ 6. 학습 · 테스트
-def train_gnn(name, store, cfg, val_df, out_dir, device, edge_updates=False, results=None):
-    """01 의 train_gnn 그대로. 검증은 eval_period 에폭마다 (그래프 교체 포함), 검증 AP 최고 체크포인트 저장"""
+def train_gnn(name, store, cfg, val_df, out_dir, device, edge_updates=False, results=None, kind='gine'):
+    """01 의 train_gnn 그대로. 검증은 eval_period 에폭마다 (그래프 교체 포함), 검증 AP 최고 체크포인트 저장. kind: 모델 종류 (make_model)"""
     import torch, torch.nn as nn
     from tqdm.auto import tqdm
     torch.manual_seed(cfg.seed)
-    model = make_gine(store.edge_dim, cfg, edge_updates).to(device)
+    model = make_model(kind, store.edge_dim, cfg, edge_updates, store).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     loss_fn = nn.CrossEntropyLoss(weight=torch.tensor(cfg.class_weight, device=device))
     history, best_ap, stale, stream = [], -np.inf, 0, None
@@ -684,13 +693,14 @@ def train_gnn(name, store, cfg, val_df, out_dir, device, edge_updates=False, res
     best = hist.loc[hist['AP'].idxmax()]
     rec = dict(val={k: float(best[k]) for k in VAL_KEYS}, test=None, best_epoch=int(best['epoch']), epochs_run=len(hist),
                train_sec=round(time.time() - t_start), targets_seen=int(best['epoch']) * cfg.iter_per_epoch * cfg.batch_size,
-               gpu_peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if device.type == 'cuda' else None)
+               gpu_peak_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if device.type == 'cuda' else None,
+               kind=kind, n_params=sum(p.numel() for p in model.parameters()), epoch_sec=float(hist['epoch_sec'].mean()))
     if results is not None:
         results[name] = rec
     return model, hist
 
 
-def test_gnn(name, store, cfg, test_df, out_dir, device, edge_updates, results):
+def test_gnn(name, store, cfg, test_df, out_dir, device, edge_updates, results, kind='gine'):
     """저장된 체크포인트로 테스트 구간 전체 추론. 점수 parquet 저장"""
     import torch
     if not (out_dir / f'{name}.pt').exists():
@@ -699,7 +709,7 @@ def test_gnn(name, store, cfg, test_df, out_dir, device, edge_updates, results):
         hist = pd.read_csv(out_dir / f'{name}_history.csv'); best = hist.loc[hist['AP'].idxmax()]
         results[name] = dict(val={k: float(best[k]) for k in VAL_KEYS}, test=None, best_epoch=int(best['epoch']), epochs_run=len(hist),
                              train_sec=int(hist['epoch_sec'].sum()), targets_seen=int(best['epoch']) * cfg.iter_per_epoch * cfg.batch_size, gpu_peak_gb=None)
-    model = make_gine(store.edge_dim, cfg, edge_updates).to(device)
+    model = make_model(kind, store.edge_dim, cfg, edge_updates, store).to(device)
     model.load_state_dict(torch.load(out_dir / f'{name}.pt', map_location=device, weights_only=True))
     t0 = time.time(); score = predict_store(model, store, 'test', cfg, device)
     pd.DataFrame(dict(edge_id=test_df.edge_id, y=test_df.y, score=score)).to_parquet(out_dir / f'{name}_test_scores.parquet', index=False)

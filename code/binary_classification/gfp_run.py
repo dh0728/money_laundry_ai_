@@ -13,7 +13,10 @@
   --tag NAME         출력 폴더 접미사 (설정을 바꿔 돌릴 때 part 가 섞이지 않게). 기본 ''
   --tw SEC           전체 time_window 와 fan/degree 창 (기본 86400)
   --no-vs            vertex stats 끄기 (속도 비교용)
-자기 루프(src == dst) 는 GFP 입력에서 뺀다 — 창 밖 삭제 때 'Edge does not exist' 로 크래시하는 원인이고 모티프에도 무의미. 그 행의 피처는 0
+GFP 입력에서 빼는 행 ('Edge does not exist' 크래시 대책):
+  - 자기 루프(src == dst): 모티프에 무의미. 피처 0
+  - 같은 (src, dst, ts) 중복: snapml 은 "이미 그래프에 있는 간선은 무시" 하는데 그 뒤 창 밖 삭제에서 어긋나는 것으로 보임.
+    첫 행만 넣고 나머지 행은 첫 행의 피처를 복사 (그래프상 같은 간선이라 값도 같아야 함)
 """
 import argparse, faulthandler, gc, sys, time
 from pathlib import Path
@@ -37,7 +40,7 @@ VS_FEATS = ['fan', 'deg', 'ratio', 'avg', 'sum', 'min', 'max']
 def gfp_params(threads, cycle_tw, lc_len, tw=DAY, vs=True):
     return {
         'num_threads': threads, 'time_window': tw,
-        'vertex_stats': vs, 'vertex_stats_cols': [4], 'vertex_stats_feats': [0, 1, 2, 3, 4, 5, 6],
+        'vertex_stats': vs, 'vertex_stats_tw': tw, 'vertex_stats_cols': [4], 'vertex_stats_feats': [0, 1, 2, 3, 4, 5, 6],
         'fan': True, 'fan_tw': tw, 'fan_bins': [2, 3, 4, 5, 6, 8, 10, 15],
         'degree': True, 'degree_tw': tw, 'degree_bins': [2, 3, 4, 5, 6, 8, 10, 15],
         'scatter-gather': True, 'scatter-gather_tw': 6 * 3600, 'scatter-gather_bins': [2, 3, 4, 6, 8],
@@ -84,8 +87,13 @@ def iter_chunks(pf, cols, start_row=0, n_rows=None, chunk=READ_CHUNK):
 def transform_by_minute(gp, X, fitted, n_feat, log=None, log_every=50):
     """X 를 같은 timestamp 묶음으로 잘라 순서대로 transform. 자기 루프(src == dst) 는 입력에서 빼고 피처 0 으로 둔다"""
     out = np.zeros((len(X), n_feat), np.float64); t0 = time.time()
-    keep = np.flatnonzero(X[:, 1] != X[:, 2]); Xk = X[keep]
-    ts = Xk[:, 3]; assert (np.diff(ts) >= 0).all(), '시간순 아님'
+    ts_all = X[:, 3]; assert (np.diff(ts_all) >= 0).all(), '시간순 아님'
+    # 같은 (ts, src, dst) 중복 → 첫 행(대표) 만 GFP 에 넣고, 나머지는 대표의 피처를 복사
+    key = np.rec.fromarrays([X[:, 3], X[:, 1], X[:, 2]])
+    _, rep_idx, inv = np.unique(key, return_index=True, return_inverse=True)       # inv: 각 행 → 대표 번호
+    dup_mask = np.ones(len(X), bool); dup_mask[rep_idx] = False                     # 대표가 아닌 중복 행
+    keep = np.flatnonzero((X[:, 1] != X[:, 2]) & ~dup_mask); Xk = X[keep]           # 자기 루프 제외 + 대표만
+    ts = Xk[:, 3]
     bounds = np.flatnonzero(np.diff(ts) != 0) + 1; starts = np.r_[0, bounds]; ends = np.r_[bounds, len(Xk)]
     for k, (s, e) in enumerate(zip(starts, ends)):
         res = gp.transform(Xk[s:e]) if fitted else gp.fit_transform(Xk[s:e]); fitted = True
@@ -94,6 +102,8 @@ def transform_by_minute(gp, X, fitted, n_feat, log=None, log_every=50):
             rate = e / max(time.time() - t0, 1e-9)
             log.write(f'{time.strftime("%H:%M:%S")} edge_id {int(Xk[s, 0])} call {k}/{len(starts)} batch {e - s} '
                       f'{rate:,.0f} rows/s RSS {psutil.Process().memory_info().rss / 1e9:.1f}GB\n'); log.flush()
+    if dup_mask.any():                                                              # 중복 행 ← 대표 행 피처
+        out[dup_mask] = out[rep_idx[inv[dup_mask]]]
     return out, fitted, len(starts)
 
 
