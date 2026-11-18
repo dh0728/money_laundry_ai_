@@ -89,6 +89,10 @@ class Config:
     heads: int = 4                    # attention 계열(GAT · TransConv · SALT) 머리 수 (2단계)
     num_workers: int = 0
     seed: int = 42
+    # GNN 구조 장치 스위치 (09_gnn_structure). 셋 다 True 가 01~06 과 같은 구성
+    use_reverse_mp: bool = True       # False: rev_to 이웃을 뽑지 않고 모델도 정방향(to) 메시지만 쓴다
+    use_ports: bool = True            # False: in_port · out_port 열을 0 으로 (z-norm 평균값 = 정보 없음)
+    use_ego: bool = True              # False: ego ID 열을 0 으로 (target 양끝 표시 없음)
 
     def __post_init__(self):
         w = WINDOWS[self.dataset]
@@ -498,11 +502,12 @@ class GraphStore:
     def make_loader(self, graph, targets, shuffle):
         from torch_geometric.loader import LinkNeighborLoader
         cfg = self.cfg
+        rev_neighbors = cfg.num_neighbors if cfg.use_reverse_mp else [0] * len(cfg.num_neighbors)   # reverse MP 를 끄면 역방향 이웃을 안 뽑는다
         return LinkNeighborLoader(
-            graph, num_neighbors={TO: cfg.num_neighbors, REV: cfg.num_neighbors},
+            graph, num_neighbors={TO: cfg.num_neighbors, REV: rev_neighbors},
             edge_label_index=(TO, graph[TO].edge_index[:, targets]), edge_label=graph[TO].y[targets],
             batch_size=cfg.batch_size if shuffle else cfg.eval_batch_size, shuffle=shuffle,
-            transform=AddEgoIdsAndTargetAttr(self.FEAT16, self.PORT_COLS, graph[TO].orig[targets]),
+            transform=AddEgoIdsAndTargetAttr(self.FEAT16, self.PORT_COLS, graph[TO].orig[targets], use_ego=cfg.use_ego, use_ports=cfg.use_ports),
             is_sorted=True, num_workers=cfg.num_workers, persistent_workers=cfg.num_workers > 0)
 
     def use(self, name):
@@ -539,8 +544,9 @@ class AddEgoIdsAndTargetAttr:
     2) 엣지 피처를 FEAT16[orig] 로 꺼냄 (그래프에는 tx 행 번호만 있음). rev_to 는 in_port ↔ out_port 교환
     3) seed 간선 원 피처를 batch.target_attr 로 (target_rows = seed 들의 tx 행 번호, input_id 순)
     4) uint8 라벨 → long"""
-    def __init__(self, feat16, port_cols, target_rows):
+    def __init__(self, feat16, port_cols, target_rows, use_ego=True, use_ports=True):
         self.F, self.port_cols, self.target_rows = feat16, list(port_cols), target_rows
+        self.use_ego, self.use_ports = use_ego, use_ports      # False 면 그 입력을 0 으로 둔다 (모델 구조는 그대로, 정보만 없앰)
 
     def rows(self, idx):
         """F[idx] 를 float32 텐서로. F 가 torch 텐서(RAM 또는 GPU)든 numpy memmap(디스크)이든 같은 결과.
@@ -552,12 +558,19 @@ class AddEgoIdsAndTargetAttr:
 
     def __call__(self, batch):
         import torch
-        ego = torch.zeros(batch['node'].num_nodes, 1); ego[batch[TO].edge_label_index.flatten()] = 1
+        ego = torch.zeros(batch['node'].num_nodes, 1)
+        if self.use_ego:
+            ego[batch[TO].edge_label_index.flatten()] = 1
         batch['node'].x = torch.cat([batch['node'].x, ego], 1)
         batch[TO].edge_attr = self.rows(batch[TO].orig)
-        rev = self.rows(batch[REV].orig); rev[:, self.port_cols] = rev[:, self.port_cols[::-1]]
+        rev = self.rows(batch[REV].orig)
+        if self.port_cols:
+            rev[:, self.port_cols] = rev[:, self.port_cols[::-1]]
         batch[REV].edge_attr = rev
         batch.target_attr = self.rows(self.target_rows[batch[TO].input_id])
+        if self.port_cols and not self.use_ports:               # port 끄기: 세 곳의 port 열을 모두 0 으로
+            for attr in (batch[TO].edge_attr, batch[REV].edge_attr, batch.target_attr):
+                attr[:, self.port_cols] = 0
         batch[TO].edge_label = batch[TO].edge_label.long()
         return batch
 
@@ -569,36 +582,38 @@ def make_gine(edge_dim, cfg, edge_updates):
 
     class GINe(nn.Module):
         """Multi-GNN GINe + to_hetero(aggr='mean'). 간선 타입 fwd(to) / rev(rev_to) 각각 GINEConv, 출력 평균"""
-        def __init__(self, num_features, edge_dim, n_hidden, num_gnn_layers, n_classes=2, edge_updates=False, dropout=0.0, final_dropout=0.5):
+        def __init__(self, num_features, edge_dim, n_hidden, num_gnn_layers, n_classes=2, edge_updates=False, dropout=0.0, final_dropout=0.5, reverse_mp=True):
             super().__init__()
             self.n_hidden, self.num_gnn_layers, self.edge_updates, self.dropout = n_hidden, num_gnn_layers, edge_updates, dropout
+            self.types = ('fwd', 'rev') if reverse_mp else ('fwd',)      # reverse MP 를 끄면 rev 쪽 층을 아예 만들지 않는다
             self.node_emb = nn.Linear(num_features, n_hidden)
-            self.edge_emb = nn.ModuleDict({t: nn.Linear(edge_dim, n_hidden) for t in ('fwd', 'rev')})
+            self.edge_emb = nn.ModuleDict({t: nn.Linear(edge_dim, n_hidden) for t in self.types})
             self.convs = nn.ModuleList(); self.emlps = nn.ModuleList(); self.batch_norms = nn.ModuleList()
             for _ in range(num_gnn_layers):
                 self.convs.append(nn.ModuleDict({t: GINEConv(nn.Sequential(nn.Linear(n_hidden, n_hidden), nn.ReLU(), nn.Linear(n_hidden, n_hidden)),
-                                                             edge_dim=n_hidden) for t in ('fwd', 'rev')}))
+                                                             edge_dim=n_hidden) for t in self.types}))
                 if edge_updates:
-                    self.emlps.append(nn.ModuleDict({t: nn.Sequential(nn.Linear(3 * n_hidden, n_hidden), nn.ReLU(), nn.Linear(n_hidden, n_hidden)) for t in ('fwd', 'rev')}))
+                    self.emlps.append(nn.ModuleDict({t: nn.Sequential(nn.Linear(3 * n_hidden, n_hidden), nn.ReLU(), nn.Linear(n_hidden, n_hidden)) for t in self.types}))
                 self.batch_norms.append(BatchNorm(n_hidden))
             self.mlp = nn.Sequential(nn.Linear(n_hidden * 3, 50), nn.ReLU(), nn.Dropout(final_dropout),
                                      nn.Linear(50, 25), nn.ReLU(), nn.Dropout(final_dropout), nn.Linear(25, n_classes))
 
         def forward(self, x, ei, ea, target_index, target_attr):
             x = self.node_emb(x)
-            ea = {t: self.edge_emb[t](ea[t]) for t in ('fwd', 'rev')}
+            ea = {t: self.edge_emb[t](ea[t]) for t in self.types}
             target_emb = self.edge_emb['fwd'](target_attr)
             for i in range(self.num_gnn_layers):
-                h = (self.convs[i]['fwd'](x, ei['fwd'], ea['fwd']) + self.convs[i]['rev'](x, ei['rev'], ea['rev'])) / 2
+                h = sum(self.convs[i][t](x, ei[t], ea[t]) for t in self.types) / len(self.types)
                 x = (x + F.relu(self.batch_norms[i](h))) / 2
                 x = F.dropout(x, self.dropout, self.training)
                 if self.edge_updates:
-                    for t in ('fwd', 'rev'):
+                    for t in self.types:
                         s, d = ei[t]; ea[t] = ea[t] + self.emlps[i][t](torch.cat([x[s], x[d], ea[t]], -1)) / 2
             h = torch.cat([x[target_index[0]], x[target_index[1]]], 1).relu()
             return self.mlp(torch.cat([h, target_emb], 1))
 
-    return GINe(2, edge_dim, cfg.n_hidden, cfg.n_gnn_layers, edge_updates=edge_updates, dropout=cfg.dropout, final_dropout=cfg.final_dropout)
+    return GINe(2, edge_dim, cfg.n_hidden, cfg.n_gnn_layers, edge_updates=edge_updates, dropout=cfg.dropout, final_dropout=cfg.final_dropout,
+                reverse_mp=cfg.use_reverse_mp)
 
 
 def make_model(kind, edge_dim, cfg, edge_updates=False, store=None):
