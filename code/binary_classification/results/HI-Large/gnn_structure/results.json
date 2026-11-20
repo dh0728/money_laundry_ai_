@@ -26,6 +26,28 @@
       "in_port",
       "out_port"
     ],
+    "tree": [
+      "amount_received",
+      "received_currency",
+      "pair_prior_count",
+      "pair_gap_minutes",
+      "pair_count_1h",
+      "reverse_history_count",
+      "src_out_1h",
+      "dst_in_1h",
+      "src_hist_out",
+      "src_hist_uniq_out",
+      "src_active_days",
+      "src_rate_vs_prior",
+      "src_minute_burst",
+      "src_gap_minutes",
+      "dst_hist_in",
+      "dst_hist_uniq_in",
+      "dst_active_days",
+      "dst_rate_vs_prior",
+      "dst_minute_burst",
+      "dst_gap_minutes"
+    ],
     "conditions": {
       "plain": {
         "use_reverse_mp": false,
@@ -194,6 +216,58 @@
       "kind": "gine",
       "n_params": 67839,
       "epoch_sec": 220.3783783783784
+    },
+    "lightgbm": {
+      "val": {
+        "AP": 0.635488827374649,
+        "F1": 0.6709769617232376,
+        "precision": 0.8038010061776335,
+        "recall": 0.5758248261577157,
+        "threshold": 0.6685804481445614,
+        "recall_at_1pct": 0.7979286876756917,
+        "unmatched_recall_at_1pct": 0.5061701350857978,
+        "ECE": 0.0026067670004468004,
+        "F1_at_0.5": 0.657097011724885
+      },
+      "test": {
+        "AP": 0.5005434919751761,
+        "F1": 0.5579915648632927,
+        "precision": 0.7468853416390889,
+        "recall": 0.44535693557748113,
+        "threshold": 0.9261550903320312,
+        "recall_at_1pct": 0.6180208937899013,
+        "unmatched_recall_at_1pct": 0.11560288656904645,
+        "ECE": 0.012497135691273533,
+        "F1_at_0.5": 0.2235766817316971
+      },
+      "best_iteration": 500,
+      "train_sec": 1450
+    },
+    "xgboost": {
+      "val": {
+        "AP": 0.6355692445965971,
+        "F1": 0.6747054160238874,
+        "precision": 0.8327185802008342,
+        "recall": 0.5670957242195591,
+        "threshold": 0.7174959182739258,
+        "recall_at_1pct": 0.7861813877792573,
+        "unmatched_recall_at_1pct": 0.4792990142387733,
+        "ECE": 0.0027520954633853244,
+        "F1_at_0.5": 0.6471035013037739
+      },
+      "test": {
+        "AP": 0.4981699395178088,
+        "F1": 0.5528353596851031,
+        "precision": 0.7549103330486764,
+        "recall": 0.43609982588508417,
+        "threshold": 0.9463983178138733,
+        "recall_at_1pct": 0.6270168311085317,
+        "unmatched_recall_at_1pct": 0.12891473411336088,
+        "ECE": 0.011526122241761333,
+        "F1_at_0.5": 0.2475495370509998
+      },
+      "best_iteration": 393,
+      "train_sec": 1159
     }
   }
 }
