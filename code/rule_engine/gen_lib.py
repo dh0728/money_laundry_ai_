@@ -169,3 +169,80 @@ def alert_purity(graph, role, y, alerts):
     out = alerts.merge(purity, left_on='alert', right_index=True, how='left')
     out['purity'] = out['laundering'] / out['counted']
     return out
+
+
+# ----------------------------------------------------------------------------- 묶음을 정답(세탁 시도)과 비교 (02)
+def link_by_account(seeds, hours=None):
+    """단순 연결: 씨앗(DataFrame[ts, src, dst])을 '계좌를 공유하면 같은 묶음' 규칙으로 묶고 행마다 묶음 번호를 돌려준다.
+
+    hours 를 주면 같은 계좌에서 시간순으로 이웃한 두 씨앗의 간격이 그 시간 이하일 때만 잇는다.
+    금액, 방향, 바쁜 계좌는 보지 않는다. 생성기와 비교하기 위한 기준선이다.
+    """
+    n = len(seeds)
+    parent = np.arange(n)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    seconds = seeds['ts'].to_numpy().astype('datetime64[s]').astype('int64')
+    ends = pd.DataFrame(dict(row=np.tile(np.arange(n), 2), t=np.tile(seconds, 2),
+                             account=np.concatenate([seeds['src'].to_numpy(), seeds['dst'].to_numpy()])))
+    ends = ends.drop_duplicates(['row', 'account']).sort_values(['account', 't', 'row'])
+    account, row, t = ends['account'].to_numpy(), ends['row'].to_numpy(), ends['t'].to_numpy()
+    linked = account[1:] == account[:-1]
+    if hours is not None:
+        linked &= (t[1:] - t[:-1]) <= hours * 3600
+    for a, b in zip(row[:-1][linked], row[1:][linked]):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    return np.array([find(i) for i in range(n)])
+
+
+def _pairs(n):
+    return n * (n - 1) // 2
+
+
+def compare_to_truth(name, groups, attempt_of, eval_attempts):
+    """묶음 하나(방법 하나)를 정답 시도와 비교한다.
+
+    groups       : DataFrame[edge_id, group, y]. 묶음에 들어간 거래만(묶음 크기 2 이상). 한 거래는 한 묶음에만 있다
+    attempt_of   : DataFrame[edge_id, attempt_id, pattern_type]. 패턴 세탁 거래 전부(평가 대상이 아닌 시도 포함)
+    eval_attempts: 평가할 시도 번호들(평가 구간 안에서 시작하고 끝난 시도)
+    돌려주는 것  : (요약 dict, 시도별 DataFrame)
+    """
+    g = groups.merge(attempt_of[['edge_id', 'attempt_id']], on='edge_id', how='left')
+    size = g.groupby('group').size()
+    # --- 묶음 쪽: 묶음이 얼마나 깨끗한가
+    cell = g.dropna(subset=['attempt_id']).groupby(['group', 'attempt_id']).size()
+    attempts_in = cell.groupby('group').size().reindex(size.index, fill_value=0)
+    dominant = cell.groupby('group').max().reindex(size.index, fill_value=0)
+    laundering = g.groupby('group')['y'].sum()
+    same_pairs = int(sum(_pairs(int(v)) for v in cell.to_numpy()))
+    all_pairs = int(sum(_pairs(int(v)) for v in size.to_numpy()))
+    # --- 정답 쪽: 시도가 얼마나 온전히 한 묶음에 들어갔나
+    truth = attempt_of[attempt_of['attempt_id'].isin(eval_attempts)].merge(groups[['edge_id', 'group']], on='edge_id', how='left')
+    rows = []
+    for attempt, part in truth.groupby('attempt_id'):
+        inside = part['group'].dropna()
+        counts = inside.value_counts()
+        rows.append(dict(attempt_id=attempt, pattern_type=part['pattern_type'].iloc[0], size=len(part),
+                         covered=len(inside), best=int(counts.iloc[0]) if len(counts) else 0, n_groups=len(counts),
+                         same_pairs=int(sum(_pairs(int(v)) for v in counts.to_numpy()))))
+    per = pd.DataFrame(rows)
+    per['coverage'] = per['best'] / per['size']
+    summary = dict(
+        방법=name, 묶음_수=len(size), 묶인_거래=int(size.sum()), 크기_중앙값=float(size.median()), 크기_최대=int(size.max()),
+        세탁_비율=round(float(laundering.sum() / size.sum()), 4),
+        전부_정상_묶음=int((laundering == 0).sum()),
+        시도_2개이상_섞인_묶음=int((attempts_in >= 2).sum()),
+        쌍_정밀도=round(same_pairs / max(all_pairs, 1), 4),          # 같은 묶음의 두 거래가 같은 시도일 비율
+        쌍_재현율=round(per['same_pairs'].sum() / max(int(sum(_pairs(int(v)) for v in per['size'])), 1), 4),   # 같은 시도의 두 거래가 같은 묶음일 비율
+        시도_수=len(per), 온전히_한_묶음=int((per['best'] == per['size']).sum()),
+        온전_비율=round(float((per['best'] == per['size']).mean()), 4),
+        평균_최대_포함률=round(float(per['coverage'].mean()), 4),
+        쪼개진_시도=int((per['n_groups'] >= 2).sum()), 전혀_안_묶인_시도=int((per['covered'] == 0).sum()))
+    return summary, per
