@@ -206,12 +206,13 @@ def _pairs(n):
     return n * (n - 1) // 2
 
 
-def compare_to_truth(name, groups, attempt_of, eval_attempts):
+def compare_to_truth(name, groups, attempt_of, eval_attempts, truth=None):
     """묶음 하나(방법 하나)를 정답 시도와 비교한다.
 
     groups       : DataFrame[edge_id, group, y]. 묶음에 들어간 거래만(묶음 크기 2 이상). 한 거래는 한 묶음에만 있다
     attempt_of   : DataFrame[edge_id, attempt_id, pattern_type]. 패턴 세탁 거래 전부(평가 대상이 아닌 시도 포함)
-    eval_attempts: 평가할 시도 번호들(평가 구간 안에서 시작하고 끝난 시도)
+    eval_attempts: 평가할 시도 번호들
+    truth        : 정답으로 쓸 거래 DataFrame[edge_id, attempt_id, pattern_type]. 안 주면 eval_attempts 의 거래 전부
     돌려주는 것  : (요약 dict, 시도별 DataFrame)
     """
     g = groups.merge(attempt_of[['edge_id', 'attempt_id']], on='edge_id', how='left')
@@ -224,7 +225,9 @@ def compare_to_truth(name, groups, attempt_of, eval_attempts):
     same_pairs = int(sum(_pairs(int(v)) for v in cell.to_numpy()))
     all_pairs = int(sum(_pairs(int(v)) for v in size.to_numpy()))
     # --- 정답 쪽: 시도가 얼마나 온전히 한 묶음에 들어갔나
-    truth = attempt_of[attempt_of['attempt_id'].isin(eval_attempts)].merge(groups[['edge_id', 'group']], on='edge_id', how='left')
+    if truth is None:
+        truth = attempt_of[attempt_of['attempt_id'].isin(eval_attempts)]
+    truth = truth[['edge_id', 'attempt_id', 'pattern_type']].merge(groups[['edge_id', 'group']], on='edge_id', how='left')
     rows = []
     for attempt, part in truth.groupby('attempt_id'):
         inside = part['group'].dropna()
