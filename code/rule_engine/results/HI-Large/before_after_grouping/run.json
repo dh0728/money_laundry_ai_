@@ -1,0 +1,28 @@
+{
+  "dataset": "HI-Large",
+  "scores": "../binary_classification/results/HI-Large/gnn_structure/rev_port_test_scores.parquet",
+  "threshold": 0.5560676455497742,
+  "seed_low": null,
+  "chain_floor": null,
+  "pad_days": 14,
+  "test_window": [
+    "2022-10-17",
+    "2022-10-30"
+  ],
+  "generator_commit": "ce5b429 2026-11-19 Merge pull request #227 from dh0728/backend",
+  "info": {
+    "policy": "block-pin-3",
+    "index_seconds": 126.5,
+    "build_seconds": 10.1,
+    "edge_visits": 2855718,
+    "graphs": 3761,
+    "unassigned": 14575
+  },
+  "alert_summary": {
+    "Alert_수": 3761,
+    "세탁_1건_이상": 3610,
+    "세탁_절반_이상": 3566,
+    "전부_세탁": 3026,
+    "전부_정상": 151
+  }
+}
