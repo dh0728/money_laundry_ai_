@@ -12,7 +12,7 @@
 실험에 맞춰 바꾼 것 (12_downsample_fraudgt.ipynb 머리말의 확정 설정)
   - 노드 입력: 계좌 피처 19 + ego → [상수 1, ego] 2열 (base 피처는 계좌 값을 엣지에 싣는다)
   - 엣지 입력: v10 14 + 결제방식 8 + 관계별 port 1 → base 20열 + port 2열 (양쪽 관계에 모두, rev_to 는 교환, z-norm) — 09 와 같은 행렬
-  - 양성 가중 6 → 6.27, cosine 500 에폭 기준 → 250 에폭 기준, 체크포인트 선택 검증 F1@0.5 → 검증 AP, 검증 표본 = 09 고정 표본
+  - 양성 가중 6 → 6.27, cosine 500 에폭 기준 → 250 에폭 기준 (200 에폭에서 멈추고 필요하면 250 까지 이어 돈다), 체크포인트 선택 검증 F1@0.5 → 검증 AP, 검증 표본 = 09 고정 표본
 
 배치 규약은 bc_lib 과 같다 (FGTStore 가 만드는 배치). bc_lib 은 건드리지 않는다
 속도: 이웃 샘플링은 DataLoader 워커(cfg.num_workers) 가, 피처 꺼내기(GPU) 는 메인 프로세스가 한다. 둘 다 배치 내용의 규칙을 바꾸지 않는다
@@ -43,7 +43,7 @@ class FGTConfig:
     base_lr: float = 0.001
     weight_decay: float = 1e-5
     warmup_epochs: int = 5
-    max_epochs: int = 250             # 여기까지 조기 종료 없이 돈다
+    max_epochs: int = 200             # 여기까지 조기 종료 없이 돈다. 나중에 schedule_epochs 까지 올려 다시 돌리면 이어서 간다
     schedule_epochs: int = 250        # cosine 이 0 에 닿는 에폭 (dev 는 500 기준으로 두고 284 에서 멈췄다)
     batch_accumulation: int = 8       # 로더 배치 8개의 평균 gradient 를 더한 뒤 1 step
     gradient_clip: float = 1.0
@@ -325,9 +325,36 @@ def predict(model, store, name, device):
 
 
 # ============================================================================ 학습
+def _comparable(fgt):
+    """FGTConfig 값 중 이어 돌리기를 막지 않는 것은 뺀다
+    - checkpoint_layers : 결과에 영향 없는 구현 옵션
+    - max_epochs        : 어디서 멈출지일 뿐이다. 학습률 곡선은 schedule_epochs 가 정하므로, 늘려서 이어 돌려도 처음부터 그만큼 돌린 것과 같은 곡선이다"""
+    return {k: v for k, v in fgt.items() if k not in ('checkpoint_layers', 'max_epochs')}
+
+
+def done_record(name, out_dir):
+    """<name>_done.json (학습이 끝까지 간 기록). 없으면 None"""
+    p = Path(out_dir) / f'{name}_done.json'
+    return json.loads(p.read_text(encoding='utf-8')) if p.exists() else None
+
+
+def is_done(name, out_dir, fcfg):
+    """지금 설정의 max_epochs 까지 학습이 끝났나. max_epochs 를 늘리면 False 가 되어 이어서 돈다"""
+    rec = done_record(name, out_dir)
+    return rec is not None and rec['epochs_run'] >= fcfg.max_epochs
+
+
+def needs_test(name, out_dir, results):
+    """테스트 추론을 (다시) 해야 하나 — 점수 파일이 없거나, 결과에 테스트 지표가 없거나, 그 지표를 낸 체크포인트(최고 에폭) 가 지금 것과 다를 때"""
+    rec, cur = done_record(name, out_dir), (results or {}).get(name) or {}
+    if rec is None or not (Path(out_dir) / f'{name}_test_scores.parquet').exists() or not cur.get('test'):
+        return True
+    return cur.get('best_epoch') != rec['best_epoch']
+
+
 def _settings(cfg, fcfg):
     """이어 돌릴 때 설정이 바뀌지 않았는지 확인할 값"""
-    fgt = asdict(fcfg); fgt.pop('checkpoint_layers')          # 결과에 영향 없는 구현 옵션이라 비교하지 않는다 (켜고 꺼도 이어 돌릴 수 있다)
+    fgt = _comparable(asdict(fcfg))
     return dict(fgt=fgt, num_neighbors=list(cfg.num_neighbors), batch_size=cfg.batch_size, eval_batch_size=cfg.eval_batch_size,
                 iter_per_epoch=cfg.iter_per_epoch, eval_period=cfg.eval_period, seed=cfg.seed,
                 use_reverse_mp=cfg.use_reverse_mp, use_ports=cfg.use_ports, use_ego=cfg.use_ego)
@@ -348,7 +375,8 @@ def train_fraudgt(name, store, cfg, fcfg, val_df, out_dir, device, results=None)
     - 에폭 = cfg.iter_per_epoch 배치. 배치마다 (채점된 target 의 평균 손실).backward() → batch_accumulation 배치마다 clip · step
     - cfg.eval_period 에폭마다와 마지막 에폭에 검증 (고정 표본, all_targets). 검증 AP 최고 → <name>.pt
     - 조기 종료 없음. 에폭마다 <name>_last.pt · <name>_history.csv 저장 → 끊기면 같은 셀을 다시 돌려 그 에폭부터 이어 간다
-    - 끝나면 <name>_done.json"""
+    - 끝나면 <name>_done.json. 나중에 fcfg.max_epochs 만 늘려 다시 부르면 (schedule_epochs 까지) 마지막 에폭 다음부터 이어 간다
+      — 학습률은 schedule_epochs 기준이라 처음부터 그만큼 돌린 것과 같은 곡선이다 (배치 순서만 다르다)"""
     import torch
     from tqdm.auto import tqdm
     out_dir = Path(out_dir); best_path, last_path = out_dir / f'{name}.pt', out_dir / f'{name}_last.pt'
@@ -358,10 +386,11 @@ def train_fraudgt(name, store, cfg, fcfg, val_df, out_dir, device, results=None)
     history, best_ap, start = [], -np.inf, 1
     if last_path.exists():
         state = torch.load(last_path, map_location=device, weights_only=False)
-        assert state['settings'] == settings, f'{last_path.name} 의 설정이 지금과 다르다 — 이어 돌릴 수 없다. 새로 하려면 {name}* 파일을 지운다'
+        saved = dict(state['settings'], fgt=_comparable(state['settings']['fgt']))
+        assert saved == settings, f'{last_path.name} 의 설정이 지금과 다르다 — 이어 돌릴 수 없다. 새로 하려면 {name}* 파일을 지운다'
         model.load_state_dict(state['model']); opt.load_state_dict(state['optimizer'])
         history, best_ap, start = state['history'], state['best_ap'], state['epoch']
-        B.log(f'[{name}] {start} 에폭부터 이어서 (지금까지 최고 검증 AP {best_ap:.4f})')
+        B.log(f'[{name}] {start} 에폭부터 이어서 → {fcfg.max_epochs} 에폭까지 (지금까지 최고 검증 AP {best_ap:.4f})')
     stream = None
     for epoch in range(start, fcfg.max_epochs + 1):
         lr = fcfg.learning_rate(epoch)
@@ -411,7 +440,10 @@ def train_fraudgt(name, store, cfg, fcfg, val_df, out_dir, device, results=None)
         tmp.replace(last_path)
     hist = pd.DataFrame(history)
     rec = _record(hist, cfg, fcfg, model, device)
-    (out_dir / f'{name}_done.json').write_text(json.dumps(dict(settings=settings, **rec), ensure_ascii=False, indent=2, default=float), encoding='utf-8')
+    prev = (results or {}).get(name) or {}
+    if start > 1 and prev.get('test') and prev.get('best_epoch') == rec['best_epoch'] and (out_dir / f'{name}_test_scores.parquet').exists():
+        rec['test'] = prev['test']           # 이어 돌렸는데 최고 체크포인트가 그대로다 → 있던 테스트 점수가 여전히 그 체크포인트의 것
+    (out_dir / f'{name}_done.json').write_text(json.dumps(dict(settings=settings, max_epochs=fcfg.max_epochs, **dict(rec, test=None)), ensure_ascii=False, indent=2, default=float), encoding='utf-8')
     if results is not None:
         results[name] = rec
     model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
@@ -423,9 +455,9 @@ def test_fraudgt(name, store, cfg, fcfg, test_df, out_dir, device, results):
     import torch
     out_dir = Path(out_dir)
     assert (out_dir / f'{name}_done.json').exists(), f'{name} 학습이 끝나지 않았다'
-    if name not in results:                     # 학습 셀을 건너뛰고 왔으면 done.json 에서 복원
-        rec = json.loads((out_dir / f'{name}_done.json').read_text(encoding='utf-8')); rec.pop('settings', None); rec['test'] = None
-        results[name] = rec
+    rec = done_record(name, out_dir); rec.pop('settings', None); rec.pop('max_epochs', None); rec['test'] = None
+    if name not in results or results[name].get('best_epoch') != rec['best_epoch'] or results[name].get('epochs_run') != rec['epochs_run']:
+        results[name] = rec                     # 학습 셀을 건너뛰고 왔거나, 이어 돌린 뒤라 기록이 예전 것이면 done.json 에서 복원
     model = make_fraudgt(store.edge_dim, fcfg).to(device)
     model.load_state_dict(torch.load(out_dir / f'{name}.pt', map_location=device, weights_only=True))
     t0 = time.time(); score = predict(model, store, 'test', device)
