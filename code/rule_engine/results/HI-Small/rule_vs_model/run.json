@@ -13,6 +13,11 @@
   ],
   "pad_days": 14,
   "lookahead_days": 0,
+  "exclude": [
+    "NO_PATTERN",
+    "STACK",
+    "BIPARTITE"
+  ],
   "filters": {
     "없음": [
       0,
