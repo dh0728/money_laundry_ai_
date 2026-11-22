@@ -1,0 +1,28 @@
+{
+  "dataset": "HI-Small",
+  "scores": "../binary_classification/results/HI-Small/model_compare/trans_s1_test_scores.parquet",
+  "threshold": 0.9514347314834595,
+  "seed_low": null,
+  "chain_floor": null,
+  "pad_days": 14,
+  "test_window": [
+    "2022-09-09",
+    "2022-09-10"
+  ],
+  "generator_commit": "ce5b429 2026-11-19 Merge pull request #227 from dh0728/backend",
+  "info": {
+    "policy": "block-pin-3",
+    "index_seconds": 12.3,
+    "build_seconds": 0.1,
+    "edge_visits": 39004,
+    "graphs": 101,
+    "unassigned": 176
+  },
+  "alert_summary": {
+    "Alert_수": 101,
+    "세탁_1건_이상": 100,
+    "세탁_절반_이상": 100,
+    "전부_세탁": 91,
+    "전부_정상": 1
+  }
+}
