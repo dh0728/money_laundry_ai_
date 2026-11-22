@@ -14,7 +14,8 @@
   - 엣지 입력: v10 14 + 결제방식 8 + 관계별 port 1 → base 20열 + port 2열 (양쪽 관계에 모두, rev_to 는 교환, z-norm) — 09 와 같은 행렬
   - 양성 가중 6 → 6.27, cosine 500 에폭 기준 → 250 에폭 기준, 체크포인트 선택 검증 F1@0.5 → 검증 AP, 검증 표본 = 09 고정 표본
 
-배치 규약은 bc_lib 과 같다 (FGTStore 가 만드는 LinkNeighborLoader 배치). bc_lib 은 건드리지 않는다
+배치 규약은 bc_lib 과 같다 (FGTStore 가 만드는 배치). bc_lib 은 건드리지 않는다
+속도: 이웃 샘플링은 DataLoader 워커(cfg.num_workers) 가, 피처 꺼내기(GPU) 는 메인 프로세스가 한다. 둘 다 배치 내용의 규칙을 바꾸지 않는다
 """
 from __future__ import annotations
 import gc, json, math, time
@@ -65,28 +66,72 @@ class FGTConfig:
 
 
 # ============================================================================ 그래프 저장소 — bc_lib.GraphStore + target 행 번호
-class WithTargetRows(B.AddEgoIdsAndTargetAttr):
-    """bc_lib 배치 변환 + seed 간선의 tx 행 번호(batch.target_rows). official readout 이 '이 target 이 샘플된 간선 중 어디 있나' 를 찾는 데 쓴다"""
+class SampleSide:
+    """이웃 샘플링 직후의 변환 — CPU 만 쓴다 (DataLoader 워커 안에서 돌아도 된다). 피처 행렬은 건드리지 않는다
+    1) ego ID 열을 x 에 붙임  2) seed 간선의 tx 행 번호(batch.target_rows — official readout 이 target 위치를 찾는 데 쓴다)  3) uint8 라벨 → long"""
+    def __init__(self, target_rows, use_ego=True):
+        self.target_rows, self.use_ego = target_rows, use_ego
+
     def __call__(self, batch):
-        batch = super().__call__(batch)
+        import torch
+        ego = torch.zeros(batch['node'].num_nodes, 1)
+        if self.use_ego:
+            ego[batch[TO].edge_label_index.flatten()] = 1
+        batch['node'].x = torch.cat([batch['node'].x, ego], 1)
         batch.target_rows = self.target_rows[batch[TO].input_id].long()
+        batch[TO].edge_label = batch[TO].edge_label.long()
         return batch
 
 
+class MainSide:
+    """메인 프로세스에서 하는 변환 — 엣지 피처를 FEAT16[orig] 로 꺼낸다 (피처 행렬이 GPU 에 있어 워커에서는 못 한다).
+    bc_lib.AddEgoIdsAndTargetAttr 의 2) · 3) 과 같은 값: rev_to 는 in_port ↔ out_port 교환, use_ports=False 면 port 열을 0 으로"""
+    def __init__(self, feat16, port_cols, use_ports=True):
+        self.rows = B.AddEgoIdsAndTargetAttr(feat16, port_cols, None).rows          # F[idx] → float32 (GPU 텐서든 memmap 이든)
+        self.port_cols, self.use_ports = list(port_cols), use_ports
+
+    def __call__(self, batch):
+        batch[TO].edge_attr = self.rows(batch[TO].orig)
+        rev = self.rows(batch[REV].orig)
+        if self.port_cols:
+            rev[:, self.port_cols] = rev[:, self.port_cols[::-1]]
+        batch[REV].edge_attr = rev
+        batch.target_attr = self.rows(batch.target_rows)
+        if self.port_cols and not self.use_ports:
+            for attr in (batch[TO].edge_attr, batch[REV].edge_attr, batch.target_attr):
+                attr[:, self.port_cols] = 0
+        return batch
+
+
+class BatchStream:
+    """LinkNeighborLoader + 메인 프로세스 변환. 워커(num_workers > 0) 가 이웃 샘플링과 SampleSide 를 미리 해 두고, 여기서 피처만 붙여 내보낸다.
+    워커를 써도 배치 내용의 규칙은 같다 (무작위 이웃 추출의 난수 순서만 달라진다). 섞지 않는 loader 는 워커를 써도 배치 순서가 유지된다"""
+    def __init__(self, loader, transform):
+        self.loader, self.transform = loader, transform
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        for batch in self.loader:
+            yield self.transform(batch)
+
+
 class FGTStore(B.GraphStore):
-    """bc_lib.GraphStore 와 같고 배치 변환만 WithTargetRows 로 바꾼다 (make_loader 본문은 bc_lib 과 같다).
-    이웃 샘플링은 PyG LinkNeighborLoader 기본값 = 균등 · 비복원 · directional (dev · 공식과 같음)"""
+    """bc_lib.GraphStore 와 같고 배치 변환만 둘로 나눈다 (LinkNeighborLoader 인자는 bc_lib.make_loader 와 같다).
+    이웃 샘플링은 PyG LinkNeighborLoader 기본값 = 균등 · 비복원 · directional (dev · 공식과 같음). cfg.num_workers > 0 이면 샘플링을 워커가 한다"""
 
     def make_loader(self, graph, targets, shuffle):
         from torch_geometric.loader import LinkNeighborLoader
         cfg = self.cfg
         rev_neighbors = cfg.num_neighbors if cfg.use_reverse_mp else [0] * len(cfg.num_neighbors)
-        return LinkNeighborLoader(
+        loader = LinkNeighborLoader(
             graph, num_neighbors={TO: cfg.num_neighbors, REV: rev_neighbors},
             edge_label_index=(TO, graph[TO].edge_index[:, targets]), edge_label=graph[TO].y[targets],
             batch_size=cfg.batch_size if shuffle else cfg.eval_batch_size, shuffle=shuffle,
-            transform=WithTargetRows(self.FEAT16, self.PORT_COLS, graph[TO].orig[targets], use_ego=cfg.use_ego, use_ports=cfg.use_ports),
+            transform=SampleSide(graph[TO].orig[targets], use_ego=cfg.use_ego),
             is_sorted=True, num_workers=cfg.num_workers, persistent_workers=cfg.num_workers > 0)
+        return BatchStream(loader, MainSide(self.FEAT16, self.PORT_COLS, use_ports=cfg.use_ports))
 
     def set_train_rows(self, rows):
         """학습 target 을 바꾼다 (loss 샘플링: 그래프 · 이웃은 그대로, 손실에 넣을 거래만 교체). 올라와 있는 그래프 · loader 는 버린다"""
@@ -282,7 +327,8 @@ def predict(model, store, name, device):
 # ============================================================================ 학습
 def _settings(cfg, fcfg):
     """이어 돌릴 때 설정이 바뀌지 않았는지 확인할 값"""
-    return dict(fgt=asdict(fcfg), num_neighbors=list(cfg.num_neighbors), batch_size=cfg.batch_size, eval_batch_size=cfg.eval_batch_size,
+    fgt = asdict(fcfg); fgt.pop('checkpoint_layers')          # 결과에 영향 없는 구현 옵션이라 비교하지 않는다 (켜고 꺼도 이어 돌릴 수 있다)
+    return dict(fgt=fgt, num_neighbors=list(cfg.num_neighbors), batch_size=cfg.batch_size, eval_batch_size=cfg.eval_batch_size,
                 iter_per_epoch=cfg.iter_per_epoch, eval_period=cfg.eval_period, seed=cfg.seed,
                 use_reverse_mp=cfg.use_reverse_mp, use_ports=cfg.use_ports, use_ego=cfg.use_ego)
 
@@ -326,14 +372,25 @@ def train_fraudgt(name, store, cfg, fcfg, val_df, out_dir, device, results=None)
         model.train(); opt.zero_grad(set_to_none=True)
         loss_sum, scored, requested, te = 0.0, 0, 0, time.time()
         for it in tqdm(range(1, cfg.iter_per_epoch + 1), desc=f'{name} epoch {epoch}', leave=False):
-            logits, labels, n = forward_batch(model, stream.next(), device, fcfg.train_readout)
-            requested += n
-            if len(logits):
-                losses = weighted_bce(logits, labels, fcfg.pos_weight)
-                if not torch.isfinite(losses).all():
-                    raise FloatingPointError(f'[{name}] epoch {epoch} 학습 손실에 nan/inf')
-                (losses.sum() / len(logits)).backward()                  # 배치 평균. zero_grad 를 안 했으므로 앞 배치의 gradient 에 더해진다
-                loss_sum += float(losses.detach().sum()); scored += len(logits)
+            batch = stream.next()
+            try:
+                logits, labels, n = forward_batch(model, batch, device, fcfg.train_readout)
+                if len(logits):
+                    losses = weighted_bce(logits, labels, fcfg.pos_weight)
+                    if not torch.isfinite(losses).all():
+                        raise FloatingPointError(f'[{name}] epoch {epoch} 학습 손실에 nan/inf')
+                    (losses.sum() / len(logits)).backward()              # 배치 평균. zero_grad 를 안 했으므로 앞 배치의 gradient 에 더해진다
+                    loss_sum += float(losses.detach().sum()); scored += len(logits)
+                requested += n
+            except torch.cuda.OutOfMemoryError:
+                if model.checkpoint_layers:
+                    raise
+                # checkpointing 을 끄고 돌다가 큰 배치에서 메모리가 모자랐다 → 켜고 계속 간다. 이번 누적 구간의 gradient 는 버린다 (최대 8 배치)
+                logits = labels = losses = batch = None
+                opt.zero_grad(set_to_none=True); gc.collect(); torch.cuda.empty_cache()
+                model.checkpoint_layers = True
+                B.log(f'[{name}] epoch {epoch} 배치 {it}: CUDA OOM → 이 조건의 남은 학습은 activation checkpointing 을 켜고 간다')
+                continue
             if it % fcfg.batch_accumulation == 0 or it == cfg.iter_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), fcfg.gradient_clip)
                 opt.step(); opt.zero_grad(set_to_none=True)
