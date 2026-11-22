@@ -1,0 +1,52 @@
+{
+  "settings": {
+    "fgt": {
+      "hidden": 64,
+      "heads": 8,
+      "layers": 2,
+      "attention_dropout": 0.2,
+      "pos_weight": 6.27,
+      "base_lr": 0.001,
+      "weight_decay": 1e-05,
+      "warmup_epochs": 5,
+      "schedule_epochs": 250,
+      "batch_accumulation": 8,
+      "gradient_clip": 1.0,
+      "train_readout": "official"
+    },
+    "num_neighbors": [
+      50,
+      50
+    ],
+    "batch_size": 2048,
+    "eval_batch_size": 2048,
+    "iter_per_epoch": 8,
+    "eval_period": 1,
+    "seed": 42,
+    "use_reverse_mp": true,
+    "use_ports": true,
+    "use_ego": true
+  },
+  "max_epochs": 2,
+  "val": {
+    "AP": 0.014339635626143838,
+    "F1": 0.045297945297567976,
+    "F1_at_0.5": 0.027964712411783246,
+    "precision": 0.02403484763100249,
+    "recall": 0.3927948866937827,
+    "threshold": 0.5257449746131897,
+    "recall_at_1pct": 0.08599651365485184,
+    "unmatched_recall_at_1pct": 0.1291248206599713,
+    "ECE": 0.45858158196687854
+  },
+  "test": null,
+  "best_epoch": 2,
+  "epochs_run": 2,
+  "train_sec": 45,
+  "epoch_sec": 7.0,
+  "targets_seen": 32768,
+  "coverage": 0.38494873046875,
+  "gpu_peak_gb": 16.1,
+  "kind": "multi_fraudgt",
+  "n_params": 226113
+}
