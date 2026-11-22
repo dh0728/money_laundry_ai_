@@ -1,0 +1,46 @@
+{
+  "name": "salt_trans_s2",
+  "seed": 2,
+  "family": "gnn",
+  "settings": {
+    "lr": 0.0012,
+    "n_hidden": 20,
+    "class_weight": [
+      1.0,
+      7.0
+    ],
+    "dropout": 0.083,
+    "final_dropout": 0.288,
+    "heads": 4
+  },
+  "val": {
+    "AP": 0.6102632205506432,
+    "F1": 0.6488899204831019,
+    "F1_at_0.5": 0.6428581694247026,
+    "precision": 0.7644007688698017,
+    "recall": 0.5637065637065637,
+    "threshold": 0.4234568774700165,
+    "recall_at_1pct": 0.8127413127413128,
+    "unmatched_recall_at_1pct": 0.49868073878627966,
+    "ECE": 0.002195283242096474
+  },
+  "test": {
+    "AP": 0.5872181653323022,
+    "F1": 0.6514215080346107,
+    "precision": 0.7960725075528701,
+    "recall": 0.551255230125523,
+    "threshold": 0.5692474246025085,
+    "recall_at_1pct": 0.7395397489539749,
+    "unmatched_recall_at_1pct": 0.3477088948787062,
+    "ECE": 0.0038714812335182477,
+    "F1_at_0.5": 0.6472019464720195
+  },
+  "best_epoch": 40,
+  "epochs_run": 72,
+  "train_sec": 2053,
+  "targets_seen": 20971520,
+  "gpu_peak_gb": 7.58,
+  "kind": "salt_trans",
+  "n_params": 49837,
+  "epoch_sec": 27.569444444444443
+}
