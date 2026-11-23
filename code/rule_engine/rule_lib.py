@@ -1,4 +1,4 @@
-"""패턴 룰 실험 공통 도구 (03_rule_vs_model).
+"""패턴 룰 실험 공통 도구 (03_rule_vs_model, 05_rule_alerts).
 
 모델 점수를 전혀 쓰지 않고 원장(거래 표)에 패턴 룰 6종을 직접 돌린다. 계산은 DuckDB 안에서 한다.
 
@@ -19,6 +19,8 @@
   random_*             그 거래가 든 (돌아오지 않는) 경로 중 가장 긴 것의 거래 수
 
 세기를 저장해 두므로 조건값을 바꿀 때 룰을 다시 돌리지 않고 걸러 보기만 하면 된다.
+표에는 그 거래를 고르게 한 대상 계좌(subj)도 같이 들어 있다. hit_groups() 가 이것으로 고른 거래를 "적중 묶음"으로 나눈다.
+05번은 그 묶음으로 생성기 없이 Alert 를 만든다(merge_groups, compare_alerts).
 
 공통 규칙
   - 자기 자신에게 보낸 거래(src = dst)는 룰이 보지 않는다. 다만 그중 환전 거래는 "환전 직후 송금"(열 fx_pair)을 표시하는 데 쓴다.
@@ -513,6 +515,132 @@ def collect(con, chosen, filters, start, end):
         FROM tx_all t {' '.join(joins)}
         WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}'
         ORDER BY t.ts, t.edge_id""").df()
+
+
+def _components(n, a, b):
+    """0..n-1 의 점을 (a[i], b[i]) 로 이은 뒤 점마다 덩어리 번호(그 덩어리에서 가장 작은 점 번호)를 돌려준다."""
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for x, y in zip(a, b):
+        rx, ry = find(int(x)), find(int(y))
+        if rx != ry:
+            parent[max(rx, ry)] = min(rx, ry)
+    return np.array([find(i) for i in range(n)], dtype=np.int64)
+
+
+def hit_groups(con, chosen, filters, start, end):
+    """고른 조건(chosen)에서 룰이 고른 거래를 "적중 묶음"으로 나눠 가져온다. [start, end] 날짜의 거래만 쓴다.
+
+    적중 묶음 = 한 룰이 같은 대상 때문에 고른 거래들. 룰만으로 Alert 를 만들 때 Alert 하나의 재료다.
+      FAN-OUT · FAN-IN · GATHER-SCATTER : 대상 계좌(뿌리는 / 모으는 / 가운데 계좌)가 같은 근거 거래
+      SCATTER-GATHER                   : 도착 계좌가 같은 근거 거래
+          → 이 넷은 대상이 같아도, 시각순으로 이웃한 두 근거 거래의 간격이 그 룰의 기간을 넘으면 거기서 나눈다
+      CYCLE · RANDOM                   : 근거 거래끼리 "이어지는 쌍"(links)으로 연결된 덩어리.
+                                          경로가 가지를 치거나 다른 경로와 거래를 공유하면 한 덩어리가 된다
+    한 거래가 대상 둘의 근거일 때(GATHER-SCATTER · SCATTER-GATHER)는 세기가 큰 쪽의 묶음에 든다(룰 표가 그렇게 저장한다).
+    따라서 한 룰 안에서는 거래 하나가 묶음 하나에만 든다. 룰이 다르면 같은 거래가 여러 묶음에 들 수 있다.
+
+    반환: DataFrame[edge_id, 룰, 대상, 묶음]
+          룰 = 패턴 이름, 묶음 = 그 룰 안에서 0 부터 매긴 번호,
+          대상 = 대상 계좌 (경로형은 덩어리에서 가장 이른 거래의 송금 계좌)
+    """
+    frames = []
+    for rule, c in chosen.items():
+        W, tag, column = c['기간_분'], filters[c['필터']], REPEAT.get(c['반복'], 'v')
+        ev = con.execute(f"""
+            SELECT r.edge_id, r.subj, t.ts, t.src
+            FROM {rule}_{W}_{tag} r JOIN tx_all t USING (edge_id)
+            WHERE r.{column} >= {c['조건값']} AND t.day BETWEEN DATE '{start}' AND DATE '{end}'
+            ORDER BY r.subj, t.ts, r.edge_id""").df()
+        if ev.empty:
+            continue
+        if rule in ('cycle', 'random'):
+            con.register('hit_ev', ev[['edge_id']])
+            pairs = con.execute(f"""SELECT l.a, l.b FROM links_{W}_{tag} l
+                                    WHERE l.a IN (SELECT edge_id FROM hit_ev) AND l.b IN (SELECT edge_id FROM hit_ev)""").df()
+            con.unregister('hit_ev')
+            ev = ev.sort_values(['ts', 'edge_id']).reset_index(drop=True)
+            row = pd.Series(ev.index, index=ev.edge_id)
+            root = _components(len(ev), row.loc[pairs.a].to_numpy(), row.loc[pairs.b].to_numpy())
+            ev['대상'] = ev.src.to_numpy()[root]          # 덩어리의 첫 거래(시각순 가장 앞)의 송금 계좌
+            ev['묶음'] = pd.factorize(root)[0]
+        else:
+            gap = ev.ts.diff() > pd.Timedelta(minutes=W)
+            ev['대상'] = ev.subj
+            ev['묶음'] = ((ev.subj != ev.subj.shift()) | gap).cumsum() - 1
+        frames.append(ev.assign(룰=RULES[rule])[['edge_id', '룰', '대상', '묶음']])
+    if not frames:
+        return pd.DataFrame(dict(edge_id=pd.Series(dtype='int64'), 룰=pd.Series(dtype='object'),
+                                 대상=pd.Series(dtype='int64'), 묶음=pd.Series(dtype='int64')))
+    return pd.concat(frames, ignore_index=True).astype({'대상': 'int64', '묶음': 'int64'})
+
+
+def merge_groups(groups):
+    """적중 묶음끼리 거래를 하나라도 공유하면 합친다. groups: DataFrame[edge_id, 룰, 묶음].
+    행마다 합친 뒤의 묶음 번호(0 부터)를 돌려준다. 공유가 사슬처럼 이어지면 전부 한 묶음이 된다(A-B 공유, B-C 공유 → A·B·C)."""
+    hit = pd.factorize(pd.MultiIndex.from_frame(groups[['룰', '묶음']]))[0]      # 적중 묶음 번호
+    order = np.argsort(groups.edge_id.to_numpy(), kind='stable')
+    edge, h = groups.edge_id.to_numpy()[order], hit[order]
+    same = edge[1:] == edge[:-1]                                                # 같은 거래가 든 두 묶음
+    root = _components(int(hit.max()) + 1 if len(hit) else 0, h[:-1][same], h[1:][same])
+    return pd.factorize(root[hit])[0]
+
+
+def compare_alerts(name, groups, attempt_of, eval_attempts, truth):
+    """묶음(Alert)을 정답 시도와 비교한다. gen_lib.compare_to_truth 와 같은 항목을 내되, **한 거래가 여러 묶음에 들어도** 된다.
+    겹침이 없는 입력에서는 compare_to_truth 와 값이 같다.
+
+    groups       : DataFrame[edge_id, group, y]. 묶음에 들어간 거래(묶음 크기 2 이상). 같은 거래가 여러 줄에 있을 수 있다
+    attempt_of   : DataFrame[edge_id, attempt_id, pattern_type]. 패턴 세탁 거래 전부
+    eval_attempts: 평가할 시도 번호들 (쓰지 않지만 compare_to_truth 와 인자를 맞춘다)
+    truth        : 정답 거래 DataFrame[edge_id, attempt_id, pattern_type]
+    겹칠 때의 뜻 : 묶인_거래 · 세탁_비율 은 거래를 한 번만 센다. 쌍_정밀도는 묶음마다 센다.
+                   쌍_재현율은 같은 시도의 두 거래가 **어느 한 묶음에라도** 같이 있으면 맞은 것으로 센다.
+                   쪼개진_시도는 시도의 거래가 묶음 2개 이상에 들어 있는 수다(같은 거래가 두 묶음에 든 경우도 포함).
+    돌려주는 것  : (요약 dict, 시도별 DataFrame)
+    """
+    pairs = lambda n: n * (n - 1) // 2
+    g = groups.merge(attempt_of[['edge_id', 'attempt_id']], on='edge_id', how='left')
+    size = g.groupby('group').size()
+    cell = g.dropna(subset=['attempt_id']).groupby(['group', 'attempt_id']).size()
+    attempts_in = cell.groupby('group').size().reindex(size.index, fill_value=0)
+    laundering = g.groupby('group')['y'].sum()
+    once = groups.drop_duplicates('edge_id')
+    same_pairs = int(sum(pairs(int(v)) for v in cell.to_numpy()))
+    all_pairs = int(sum(pairs(int(v)) for v in size.to_numpy()))
+    t = truth[['edge_id', 'attempt_id', 'pattern_type']].merge(groups[['edge_id', 'group']], on='edge_id', how='left')
+    rows = []
+    for attempt, part in t.groupby('attempt_id'):
+        inside = part.dropna(subset=['group'])
+        counts = inside['group'].value_counts()
+        together = set()                                   # 어느 한 묶음에 같이 든 (거래, 거래) 쌍
+        for _, edges in inside.groupby('group')['edge_id']:
+            e = sorted(edges)
+            together.update((e[i], e[j]) for i in range(len(e)) for j in range(i + 1, len(e)))
+        rows.append(dict(attempt_id=attempt, pattern_type=part['pattern_type'].iloc[0], size=part['edge_id'].nunique(),
+                         covered=inside['edge_id'].nunique(), best=int(counts.iloc[0]) if len(counts) else 0,
+                         n_groups=len(counts), same_pairs=len(together)))
+    per = pd.DataFrame(rows)
+    per['coverage'] = per['best'] / per['size']
+    summary = dict(
+        방법=name, 묶음_수=len(size), 묶인_거래=len(once), 여러_묶음에_든_거래=int(len(groups) - len(once)),
+        크기_중앙값=float(size.median()), 크기_최대=int(size.max()),
+        세탁_비율=round(float(once['y'].sum() / len(once)), 4),
+        전부_정상_묶음=int((laundering == 0).sum()),
+        시도_2개이상_섞인_묶음=int((attempts_in >= 2).sum()),
+        쌍_정밀도=round(same_pairs / max(all_pairs, 1), 4),
+        쌍_재현율=round(per['same_pairs'].sum() / max(int(sum(pairs(int(v)) for v in per['size'])), 1), 4),
+        시도_수=len(per), 온전히_한_묶음=int((per['best'] == per['size']).sum()),
+        온전_비율=round(float((per['best'] == per['size']).mean()), 4),
+        평균_최대_포함률=round(float(per['coverage'].mean()), 4),
+        쪼개진_시도=int((per['n_groups'] >= 2).sum()), 전혀_안_묶인_시도=int((per['covered'] == 0).sum()))
+    return summary, per
 
 
 def day_mask(frame, window):
