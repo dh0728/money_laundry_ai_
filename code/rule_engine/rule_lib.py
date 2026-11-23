@@ -520,6 +520,25 @@ def by_pattern(frame, window, methods):
     return pd.DataFrame(rows)
 
 
+def by_tail(frame, window, methods, after, labels):
+    """패턴 × 시도의 끝(구간 안에 끝남 / 구간 뒤로 이어짐) 별 재현율.
+
+    after : 거래마다 그 거래의 시도가 평가 구간 뒤로 이어지는가 (bool 배열. gen_lib.attempt_tail 로 만든다)
+    labels: {False: 이름, True: 이름} (gen_lib.TAIL_LABELS)
+    값    : 그 칸의 세탁 거래 중 그 방법이 고른 비율
+    """
+    y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
+    positive = window & (y == 1) & frame.attempt_id.notna().to_numpy()
+    rows = []
+    for name in [*sorted(set(kind[positive])), '(패턴 전체)']:
+        for flag, label in labels.items():
+            base = positive & (after == flag) & ((kind == name) | (name == '(패턴 전체)'))
+            if base.sum():
+                rows.append(dict(패턴=name, 끝=label, 시도=int(frame.attempt_id[base].nunique()), 세탁_거래=int(base.sum()),
+                                 **{method: round(int((mask & base).sum()) / int(base.sum()), 4) for method, mask in methods.items()}))
+    return pd.DataFrame(rows)
+
+
 def by_attempt(frame, window, methods, exclude=()):
     """세탁 시도 단위. 시도마다 window 안 거래 중 고른 수를 세고, 패턴별로 1건 이상 / 절반 이상 / 전부 잡은 시도의 비율을 낸다."""
     keep = np.flatnonzero(window & frame.attempt_id.notna().to_numpy() & ~frame.pattern_type.isin(list(exclude)).to_numpy())
