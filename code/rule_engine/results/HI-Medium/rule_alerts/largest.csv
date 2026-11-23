@@ -14,3 +14,13 @@ R2 겹치면 합침,101,98,17,FAN-OUT + FAN-IN + GATHER-SCATTER + SCATTER-GATHER
 R2 겹치면 합침,97,94,16,FAN-OUT + FAN-IN + GATHER-SCATTER + SCATTER-GATHER + CYCLE + RANDOM
 R2 겹치면 합침,85,84,16,FAN-OUT + GATHER-SCATTER + SCATTER-GATHER + CYCLE + RANDOM
 R2 겹치면 합침,75,71,14,FAN-OUT + FAN-IN + GATHER-SCATTER + SCATTER-GATHER + CYCLE + RANDOM
+R3 적중마다 · 주변 거래,170,10,1,
+R3 적중마다 · 주변 거래,144,13,8,
+R3 적중마다 · 주변 거래,139,8,1,
+R3 적중마다 · 주변 거래,130,7,5,
+R3 적중마다 · 주변 거래,125,12,8,
+R4 겹치면 합침 · 주변 거래,860,163,20,
+R4 겹치면 합침 · 주변 거래,482,99,18,
+R4 겹치면 합침 · 주변 거래,365,58,6,
+R4 겹치면 합침 · 주변 거래,288,97,16,
+R4 겹치면 합침 · 주변 거래,275,81,14,
