@@ -249,3 +249,35 @@ def compare_to_truth(name, groups, attempt_of, eval_attempts, truth=None):
         평균_최대_포함률=round(float(per['coverage'].mean()), 4),
         쪼개진_시도=int((per['n_groups'] >= 2).sum()), 전혀_안_묶인_시도=int((per['covered'] == 0).sum()))
     return summary, per
+
+
+# ============================================================================ 점수 파일 설정 · 시도의 끝
+def score_settings(folder, model):
+    """점수 파일 경로와 그 모델의 설정을 읽는다. 저장 모양 세 가지를 다 받는다.
+    - 00_service_scores (서비스 모델): <model>_results.json 에 val.threshold, seed_low, chain_floor, eval_window
+    - 21_model_compare: <model>_results.json 에 val.threshold
+    - 09_gnn_structure: results.json 의 results[model].val.threshold
+    반환 dict(scores, threshold, seed_low, chain_floor, eval_window). 파일에 없는 값은 None 이다"""
+    import json
+    folder = Path(folder)
+    one = folder / f'{model}_results.json'
+    if one.exists():
+        record = json.load(open(one, encoding='utf-8'))
+    else:
+        record = json.load(open(folder / 'results.json', encoding='utf-8'))['results'][model]
+    return dict(scores=folder / f'{model}_test_scores.parquet', threshold=record['val']['threshold'],
+                seed_low=record.get('seed_low'), chain_floor=record.get('chain_floor'), eval_window=record.get('eval_window'))
+
+
+def attempt_tail(con, patterns, end_day):
+    """거래 → 그 거래가 속한 세탁 시도, 그리고 그 시도가 end_day 뒤로 이어지는지(after).
+    after = 시도의 마지막 거래가 end_day 다음 날 0시 이후. 구간 안에서는 패턴이 완성되기 전 모습만 보인다.
+    한 거래가 두 시도에 들어 있으면 번호가 작은 시도로 둔다. 반환 DataFrame[edge_id, attempt_id, after]"""
+    cut = pd.Timestamp(end_day) + pd.Timedelta(days=1)
+    return con.execute(f"""WITH a AS (SELECT attempt_id, max(ts) AS last_ts FROM read_parquet('{patterns}') GROUP BY attempt_id)
+                           SELECT p.edge_id, min(p.attempt_id) AS attempt_id, arg_min(a.last_ts, p.attempt_id) >= TIMESTAMP '{cut}' AS after
+                           FROM read_parquet('{patterns}') p JOIN a USING (attempt_id)
+                           WHERE p.edge_id IS NOT NULL GROUP BY p.edge_id""").df()
+
+
+TAIL_LABELS = {False: '구간 안에 끝남', True: '구간 뒤로 이어짐'}
