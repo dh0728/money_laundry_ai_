@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>단순 연결 vs Alert 알고리즘 비교</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* 한 열짜리 보고서. 위에 결론, 아래로 근거. 차트 왼쪽 + 표 오른쪽. 색은 두 방법(보라·청록)과 거래 종류(빨강·파랑)에만 쓴다 */
+:root {
+  --bg: #fafafc; --panel: #ffffff; --ink: #17161d; --ink2: #55535f; --muted: #8a8794;
+  --line: #e3e1ea; --track: #eeedf3;
+  --alert: #6250d6; --link: #1baf7a;           /* Alert 알고리즘 / 단순 연결 */
+  --laund: #e34948; --normal: #2a78d6;         /* 세탁 / 정상 */
+  --laund-soft: #f3b1b0; --normal-soft: #9ec5f4;
+  --ref: #8a8794;
+  --font: "IBM Plex Sans KR", "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17171b; --panel: #1f1f25; --ink: #efeef3; --ink2: #c2c0cc; --muted: #8f8d9a;
+    --line: #34333c; --track: #2a2931;
+    --alert: #9085e9; --link: #199e70; --laund: #e66767; --normal: #3987e5;
+    --laund-soft: #8a3c3c; --normal-soft: #184f95; --ref: #8f8d9a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17171b; --panel: #1f1f25; --ink: #efeef3; --ink2: #c2c0cc; --muted: #8f8d9a;
+  --line: #34333c; --track: #2a2931;
+  --alert: #9085e9; --link: #199e70; --laund: #e66767; --normal: #3987e5;
+  --laund-soft: #8a3c3c; --normal-soft: #184f95; --ref: #8f8d9a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.65; font-variant-numeric: tabular-nums; word-break: keep-all; overflow-wrap: break-word; }
+main { max-width: 1080px; margin: 0 auto; padding: 40px 24px 80px; }
+h1 { font-size: 30px; line-height: 1.25; font-weight: 700; margin: 0 0 8px; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font-size: 21px; font-weight: 700; margin: 0 0 4px; text-wrap: balance; }
+h3 { font-size: 16px; font-weight: 600; margin: 0 0 10px; text-wrap: balance; }
+p { margin: 0 0 10px; text-wrap: pretty; }
+.lead { color: var(--ink2); max-width: 68ch; margin-bottom: 18px; }
+.sub { color: var(--ink2); margin: 0 0 18px; max-width: 72ch; }
+small, .note { color: var(--muted); font-size: 13px; }
+code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 0.92em; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+nav { display: flex; flex-wrap: wrap; gap: 6px 8px; margin: 18px 0 0; }
+nav a { color: var(--ink2); text-decoration: none; font-size: 13.5px; padding: 4px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); }
+nav a:hover, nav a:focus-visible { color: var(--ink); border-color: var(--muted); outline: none; }
+section { margin-top: 52px; scroll-margin-top: 16px; }
+section > header { margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.block { margin-top: 30px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; }
+.split { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); gap: 22px 28px; align-items: start; }
+.split.even { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+@media (max-width: 860px) { .split, .split.even { grid-template-columns: minmax(0, 1fr); } main { padding: 28px 16px 60px; } h1 { font-size: 25px; } }
+ul { margin: 0; padding-left: 1.15em; }
+li { margin: 3px 0; }
+li ul { margin-top: 2px; }
+.points li { margin: 6px 0; max-width: 72ch; }
+
+/* 결론 세 줄 */
+.take { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 22px 0 0; }
+@media (max-width: 860px) { .take { grid-template-columns: minmax(0, 1fr); } }
+.take .card { padding: 14px 16px; }
+.take b { display: block; font-size: 15.5px; margin-bottom: 4px; }
+.take span { color: var(--ink2); font-size: 14px; }
+
+/* 범례 */
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--ink2); margin: 0 0 12px; }
+.legend i, th i, td i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.legend i.ring { background: transparent !important; border: 2px solid var(--ref); border-radius: 50%; }
+.c-alert { background: var(--alert); } .c-link { background: var(--link); }
+.c-laund { background: var(--laund); } .c-normal { background: var(--normal); }
+.c-laund-soft { background: var(--laund-soft); } .c-normal-soft { background: var(--normal-soft); }
+.c-ref { background: var(--ref); }
+
+/* 가로 막대 */
+.grp-title { font-size: 13px; font-weight: 600; color: var(--ink2); margin: 16px 0 6px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.grp-title:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.row { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 12px; align-items: center; padding: 5px 0; }
+.row .rl { font-size: 13.5px; line-height: 1.35; }
+.row .rl small { display: block; font-size: 12px; }
+.row .rb { border-left: 1px solid var(--muted); padding: 1px 0; display: grid; gap: 2px; }
+.bar { display: flex; align-items: center; gap: 7px; height: 16px; }
+.bar .fill { height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; width: calc((100% - 150px) * var(--p)); }
+.bar.short .fill { width: calc((100% - 64px) * var(--p)); }
+.bar .seg { height: 14px; min-width: 2px; width: calc((100% - 190px) * var(--p)); }
+.bar .seg + .seg { margin-left: -5px; }
+.bar .seg:last-of-type { border-radius: 0 4px 4px 0; }
+.bar .v { font-size: 12.5px; color: var(--ink2); white-space: nowrap; }
+.bar .v b { color: var(--ink); font-weight: 600; }
+.fill, .seg, .dot, .stack span { cursor: default; }
+.fill:hover, .seg:hover, .stack span:hover { filter: brightness(1.12); }
+@media (max-width: 520px) { .row { grid-template-columns: minmax(0, 1fr); gap: 3px; } .bar .fill { width: calc((100% - 120px) * var(--p)); } }
+
+/* 100% 누적 막대 */
+.stackrow { margin: 0 0 16px; }
+.stackrow .sl { display: flex; justify-content: space-between; gap: 10px; font-size: 13.5px; margin-bottom: 5px; }
+.stackrow .sl span { color: var(--muted); font-size: 12.5px; }
+.stack { display: flex; gap: 2px; height: 24px; }
+.stack span { min-width: 3px; }
+.stack span:first-child { border-radius: 4px 0 0 4px; } .stack span:last-child { border-radius: 0 4px 4px 0; }
+.stackkey { display: flex; flex-wrap: wrap; gap: 2px 18px; font-size: 12.5px; color: var(--ink2); margin-top: 6px; }
+.stackkey b { color: var(--ink); font-weight: 600; }
+
+/* 점 그림 */
+.dotrow { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 12px; align-items: center; padding: 6px 0; }
+.dotrow .rl { font-size: 13.5px; }
+.dottrack { position: relative; height: 18px; margin-right: 10px; background: linear-gradient(var(--line), var(--line)) 0 50% / 100% 1px no-repeat; }
+.dottrack .span { position: absolute; top: 8px; height: 2px; background: var(--muted); opacity: .55; }
+.dot { position: absolute; top: 3px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; box-shadow: 0 0 0 2px var(--panel); }
+.dot.ring { background: var(--panel); border: 2px solid var(--ref); }
+.axis { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 12px; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.axis div:last-child { position: relative; height: 16px; margin-right: 10px; }
+.axis span { position: absolute; transform: translateX(-50%); }
+@media (max-width: 520px) { .dotrow, .axis { grid-template-columns: 96px minmax(0, 1fr); } }
+
+/* 기간 띠 */
+.timeline { display: flex; gap: 2px; margin: 4px 0 8px; }
+.timeline div { padding: 8px 10px; font-size: 12.5px; line-height: 1.4; border-radius: 4px; background: var(--track); color: var(--ink2); min-width: 0; }
+.timeline div b { display: block; color: var(--ink); font-size: 13px; }
+.timeline .on { background: var(--alert); color: #fff; }
+.timeline .on b { color: #fff; }
+.timeline .off { background: transparent; border: 1px dashed var(--line); }
+@media (max-width: 620px) { .timeline { flex-direction: column; } .timeline div { flex: none !important; } }
+
+/* 표 */
+.tw { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-weight: 600; color: var(--ink2); font-size: 12.5px; border-bottom: 1px solid var(--muted); vertical-align: bottom; }
+td.n, th.n { text-align: right; }
+tr.sum td { font-weight: 600; border-top: 1px solid var(--muted); }
+tr.dim td { color: var(--muted); }
+td.best { font-weight: 700; }
+caption { caption-side: bottom; text-align: left; color: var(--muted); font-size: 12.5px; padding-top: 8px; white-space: normal; }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; margin: 0; font-size: 14px; }
+dt { color: var(--ink2); font-weight: 500; }
+dd { margin: 0; }
+.callout { border-left: 3px solid var(--muted); padding: 8px 14px; background: var(--panel); border-radius: 0 8px 8px 0; color: var(--ink2); font-size: 13.5px; margin-top: 14px; max-width: 80ch; }
+.disc { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 860px) { .disc { grid-template-columns: minmax(0, 1fr); } }
+.disc .card h3 { display: flex; gap: 8px; }
+.disc .card h3 em { font-style: normal; color: var(--muted); font-weight: 600; }
+.disc li { font-size: 14px; color: var(--ink2); margin: 6px 0; }
+footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+#tip { position: fixed; z-index: 10; pointer-events: none; background: var(--ink); color: var(--bg); font-size: 12.5px; line-height: 1.45; padding: 6px 9px; border-radius: 6px; max-width: 260px; opacity: 0; transition: opacity .08s; white-space: pre-line; }
+#tip.on { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { #tip { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+
+<p class="note">AML 모니터링 시스템 · rule_engine 실험 01 · 02 · 04번 · HI-Medium</p>
+<h1>단순 연결 vs Alert 알고리즘 비교</h1>
+<p class="lead">이진분류 모델이 고른 의심 거래(씨앗)를 사건 단위로 묶을 때, 계좌만 보고 잇는 단순 연결과 서비스의 Alert 알고리즘이 정답 세탁 시도와 얼마나 같은지 비교했다.</p>
+
+<div class="take">
+  <div class="card"><b>단순 연결은 빠짐없이 담는다</b><span>세탁 거래 재현율 97.1%, 시도의 90.9%를 한 묶음에 온전히 담는다. 대신 묶음의 44%에 정상이 섞인다.</span></div>
+  <div class="card"><b>Alert 알고리즘은 정답 모양대로 끊는다</b><span>묶음이 정답 시도와 완전히 같은 비율이 52.4% (단순 연결 31.1%). 정상 씨앗의 71%를 걸러낸다.</span></div>
+  <div class="card"><b>차이는 시간이 아니라 구조 조건에서 난다</b><span>단순 연결에 7일 · 4일 제한을 걸어도 결과가 거의 같다. 1일로 줄여야 무너진다.</span></div>
+</div>
+
+<nav aria-label="목차">
+  <a href="#summary">한눈에</a><a href="#setup">실험 설정</a><a href="#tx">거래 단위</a><a href="#groups">묶음 단위</a><a href="#truth">정답 시도와 비교</a><a href="#notes">고찰</a>
+</nav>
+
+<section id="summary">
+  <header><h2>한눈에 보기</h2><p class="sub" style="margin:0">같은 씨앗을 두 방법으로 묶은 결과. 위쪽 지표는 단순 연결이, 아래쪽 지표는 Alert 알고리즘이 높다.</p></header>
+  <div class="card">
+    <div class="legend"><span><i class="c-alert"></i>Alert 알고리즘</span><span><i class="c-link"></i>단순 연결 (계좌 공유, 시간 제한 없음)</span></div>
+    <div id="hero"></div>
+  </div>
+  <p class="note" style="margin-top:10px">6종 패턴 기준. 거래 지표는 6종 세탁 9,288건, 시도 지표는 평가 구간 안 거래가 2건 이상인 시도 1,291개가 분모다.</p>
+</section>
+
+<section id="setup">
+  <header><h2>실험 설정</h2></header>
+  <div class="split even">
+    <div>
+      <dl>
+        <dt>데이터</dt><dd>HI-Medium (합성 데이터)</dd>
+        <dt>모델</dt><dd>서비스 이진 모델 <code>multi280_hgb36_v1</code></dd>
+        <dt>임계값</dt><dd>0.194997844 (점수가 이 값 이상이면 씨앗)</dd>
+        <dt>Alert 알고리즘</dt><dd>현재 서비스의 Alert 생성기 그대로</dd>
+        <dt>단순 연결</dt><dd>씨앗끼리 계좌를 공유하면 같은 묶음. 금액 · 방향 · 바쁜 계좌는 보지 않는다. 시간 제한(7일, 4일, 1일)만 바꿔 본다</dd>
+        <dt>평가 대상</dt><dd>패턴 6종. STACK, BIPARTITE, 무패턴은 뺀다</dd>
+      </dl>
+    </div>
+    <div>
+      <h3>기간</h3>
+      <div class="timeline" role="img" aria-label="09.01부터 09.07까지 이력만, 09.08부터 09.16까지 평가, 09.17부터 09.28까지 안 씀">
+        <div style="flex:7"><b>09.01 ~ 09.07</b>이력만 봄 (7일)</div>
+        <div class="on" style="flex:9"><b>09.08 ~ 09.16</b>평가 구간 (9일)</div>
+        <div class="off" style="flex:12"><b>09.17 ~ 09.28</b>안 씀</div>
+      </div>
+      <ul class="note" style="color:var(--ink2)">
+        <li>이력만 보는 구간: 피처에는 쓰고 점수 · Alert는 내지 않는다</li>
+        <li>평가 구간: 점수를 내고 씨앗 · Alert를 만들어 정답과 비교한다</li>
+        <li>09.17 이후는 정상 거래가 끊겨서 뺐다</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="block split even">
+    <div>
+      <h3>씨앗 보강</h3>
+      <p class="sub">묶기 전에 모델이 놓친 거래를 두 단계로 씨앗에 더한다. 두 방법 모두 보강된 씨앗에서 출발한다.</p>
+      <ul class="points">
+        <li><b>1단계 · 하한 0.1</b> (<code>ALERT_SEED_LOW</code>)<br>점수가 0.1 이상이고 기존 씨앗과 계좌를 공유하는 거래를 씨앗으로 올린다</li>
+        <li><b>2단계 · 바닥 0.01</b> (<code>ALERT_CHAIN_FLOOR</code>)<br>씨앗에서 출발해 받은 계좌의 이후 출금, 보낸 계좌의 이전 입금을 따라간다. 7일 이내, 금액 0.5 ~ 1.05배, 최대 6단계. 점수 0.01 이상이고 금액을 아는 거래만 탄다</li>
+      </ul>
+    </div>
+    <div>
+      <h3>보강으로 들어온 거래 876건</h3>
+      <div class="stackrow">
+        <div class="stack" id="promo"></div>
+        <div class="stackkey" id="promokey"></div>
+      </div>
+      <p class="note">세탁 중 6종은 244건, STACK · BIPARTITE · 무패턴은 127건이다.</p>
+    </div>
+  </div>
+
+  <div class="block">
+    <h3>평가 구간 뒤로 이어지는 시도</h3>
+    <p class="sub">평가 구간 안에 끝나는 시도와 09.16 뒤로 이어지는 시도를 나눠서 봤다. 뒤로 이어지는 시도는 09.16까지의 거래만 정답으로 쓴다. 두 그룹의 결과가 비슷하다.</p>
+    <div class="tw" id="t-tail"></div>
+  </div>
+</section>
+
+<section id="tx">
+  <header><h2>거래 단위 결과</h2><p class="sub" style="margin:0">묶으면 어떤 거래가 남고 빠지는가. 6종 세탁 9,288건 기준.</p></header>
+
+  <div class="split">
+    <div class="card">
+      <h3>묶기 전후로 남는 거래</h3>
+      <div class="legend"><span><i class="c-laund"></i>세탁</span><span><i class="c-normal"></i>정상</span></div>
+      <div id="stages"></div>
+      <p class="note" style="margin:10px 0 0">정상 제거: Alert 알고리즘 71%, 단순 연결 32%. 세탁 감소: 6.0%, 1.2%.</p>
+    </div>
+    <div>
+      <div class="tw" id="t-stages"></div>
+      <ul class="note" style="margin-top:10px">
+        <li>묶은 뒤 = 크기 2건 이상인 묶음(Alert)에 든 거래</li>
+        <li>Alert 구성 거래 중 평가 구간 앞쪽 거래 636건은 지표에서 뺐다</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="block split">
+    <div class="card">
+      <h3>패턴별 재현율</h3>
+      <div class="legend"><span><i class="ring"></i>씨앗 (보강 포함)</span><span><i class="c-link"></i>단순 연결</span><span><i class="c-alert"></i>Alert 알고리즘</span></div>
+      <div id="recall"></div>
+      <p class="note" style="margin:8px 0 0">가로축은 0.85에서 시작한다.</p>
+    </div>
+    <div class="tw" id="t-recall"></div>
+  </div>
+
+  <div class="block split">
+    <div class="card">
+      <h3>묶음에 못 들어간 씨앗</h3>
+      <div class="legend"><span><i class="c-laund"></i>세탁 (6종)</span><span><i class="c-normal"></i>정상</span></div>
+      <div id="dropped"></div>
+      <p class="note" style="margin:10px 0 0">단순 연결의 사유는 하나다. 계좌를 공유하는 다른 씨앗이 없음.</p>
+    </div>
+    <div>
+      <h3>Alert 알고리즘의 탈락 사유</h3>
+      <dl style="font-size:13.5px">
+        <dt><code>NO_STRUCTURE</code></dt><dd>다른 씨앗과 묶을 구조를 하나도 못 찾음. 다른 사유가 없으면 붙는 기본값</dd>
+        <dt><code>LINK_ONLY</code></dt><dd>다른 씨앗과 관계는 찾았는데 합치는 조건은 못 채움</dd>
+        <dt><code>CORE_CAP</code></dt><dd>합치면 한 Alert의 거래가 64건을 넘어서 거부됨</dd>
+        <dt><code>SELF_TRANSFER</code></dt><dd>보낸 계좌와 받은 계좌가 같은 거래. 구조 탐색에서 제외됨</dd>
+        <dt><code>COMPONENT_SPAN</code></dt><dd>합치면 Alert 기간이 14일(336시간)을 넘어서 거부됨</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="block tw" id="t-reason"></div>
+</section>
+
+<section id="groups">
+  <header><h2>묶음 단위 결과</h2><p class="sub" style="margin:0">만들어진 묶음이 얼마나 깨끗한가. 6종 세탁이 든 묶음과 전부 정상인 묶음이 대상이다.</p></header>
+
+  <div class="split">
+    <div class="card">
+      <h3>묶음 구성</h3>
+      <div id="comp"></div>
+      <div class="legend" style="margin:4px 0 0"><span><i class="c-laund"></i>전부 세탁</span><span><i class="c-laund-soft"></i>섞임 (세탁이 절반 이상)</span><span><i class="c-normal-soft"></i>섞임 (정상이 더 많음)</span><span><i class="c-normal"></i>전부 정상</span></div>
+    </div>
+    <div>
+      <div class="tw" id="t-comp"></div>
+      <ul class="note" style="margin-top:10px">
+        <li>세탁이 STACK · BIPARTITE · 무패턴뿐인 묶음은 뺐다 (Alert 778개, 단순 연결 764개)</li>
+        <li>6종 묶음 안에 같이 든 제외 패턴 세탁 거래는 빼고 셌다</li>
+        <li>묶음 최대 크기: Alert 알고리즘 64건, 단순 연결 225건</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="block split">
+    <div class="card">
+      <h3>한 묶음에 든 세탁 시도 수 (2개 이상)</h3>
+      <div class="legend"><span><i class="c-alert"></i>Alert 알고리즘</span><span><i class="c-link"></i>단순 연결</span></div>
+      <div id="mix"></div>
+      <p class="note" style="margin:10px 0 0">여러 시도가 든 묶음에 속한 거래: Alert 알고리즘 13.8% (9,189건 중 1,264건), 단순 연결 35.6% (9,022건 중 3,215건).</p>
+    </div>
+    <div class="tw" id="t-mix"></div>
+  </div>
+
+  <div class="block">
+    <h3>전부 정상인 묶음과 섞인 묶음</h3>
+    <div class="tw" id="t-normal"></div>
+    <p class="callout">전부 정상 묶음은 단순 연결이 더 적다. 정상 씨앗이 세탁 묶음에 붙어 버리기 때문이다. 섞인 묶음과 그 안의 정상 거래는 단순 연결이 두 배 넘게 많다.</p>
+  </div>
+</section>
+
+<section id="truth">
+  <header><h2>정답 시도와 비교</h2><p class="sub" style="margin:0">6종 시도 1,291개 각각이 묶음과 얼마나 같은가 (02번 실험).</p></header>
+
+  <div class="tw" id="t-truth"></div>
+  <ul class="note" style="margin-top:10px; display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:2px 40px">
+    <li><b>온전</b>: 시도의 평가 구간 안 거래가 전부 한 묶음에 들어감</li>
+    <li><b>최대 포함률</b>: 시도 거래 중 가장 많이 든 묶음 하나에 들어간 비율</li>
+    <li><b>쌍 정밀도</b>: 같은 묶음에 든 거래 쌍 중 실제로 같은 시도인 비율</li>
+    <li><b>쌍 재현율</b>: 같은 시도인 거래 쌍 중 같은 묶음에 든 비율</li>
+  </ul>
+  <p class="callout">이 표는 STACK · BIPARTITE 씨앗을 먼저 빼고 묶은 값이다. 그래서 최대 묶음 크기(62건, 176건)가 위 절의 값(64건, 225건)과 다르다.</p>
+
+  <div class="block split even">
+    <div class="card">
+      <h3>시간 제한을 바꿨을 때 온전 비율</h3>
+      <div class="legend"><span><i class="c-link"></i>단순 연결</span><span><i class="c-alert"></i>Alert 알고리즘</span></div>
+      <div id="time"></div>
+    </div>
+    <div class="card">
+      <h3>묶음이 정답 시도와 얼마나 같은가</h3>
+      <div class="tw" id="t-same"></div>
+    </div>
+  </div>
+
+  <div class="block split even">
+    <div class="card">
+      <h3>패턴별 온전 비율</h3>
+      <div class="legend"><span><i class="c-alert"></i>Alert 알고리즘</span><span><i class="c-link"></i>단순 연결</span></div>
+      <div id="bypat"></div>
+    </div>
+    <div class="card">
+      <h3>시도 크기별 온전 비율</h3>
+      <div class="legend"><span><i class="c-alert"></i>Alert 알고리즘</span><span><i class="c-link"></i>단순 연결</span></div>
+      <div id="bysize"></div>
+    </div>
+  </div>
+
+  <div class="block split even">
+    <div class="tw" id="t-bypat"></div>
+    <div class="tw" id="t-bysize"></div>
+  </div>
+</section>
+
+<section id="notes">
+  <header><h2>고찰</h2></header>
+  <div class="disc">
+    <div class="card"><h3><em>1</em>단순 연결은 빠짐없이 담고, Alert 알고리즘은 정답 모양대로 끊는다</h3><ul>
+      <li>단순 연결은 세탁 거래를 거의 안 놓친다 (재현율 0.971, 온전 비율 90.9%)</li>
+      <li>대신 묶음이 지저분하다. 쌍 정밀도 0.338, 정상이 섞인 묶음이 44.2%, 여러 시도가 한 묶음이 된 경우가 13.0%</li>
+      <li>Alert 알고리즘은 반대다. 재현율 0.924, 온전 비율 72.7%로 덜 담지만 쌍 정밀도 0.657, 전부 세탁인 Alert가 79.6%</li>
+      <li>묶음이 정답 시도와 완전히 같은 비율은 Alert 알고리즘 52.4%, 단순 연결 31.1%</li></ul></div>
+    <div class="card"><h3><em>2</em>차이가 나는 이유</h3><ul>
+      <li>단순 연결은 계좌 하나만 겹쳐도 건너건너 이어진다. 계좌를 같이 쓰는 다른 시도와 정상 씨앗이 한 덩어리가 된다 (최대 225건, 시도 26개가 한 묶음)</li>
+      <li>Alert 알고리즘은 계좌 공유만으로는 안 묶고 부채꼴 · 릴레이 · 금액 흐름 같은 구조 조건을 통과해야 묶는다</li>
+      <li>단순 연결이 6종 시도에 붙인 다른 거래 25,510쌍이 Alert 알고리즘에서는 37%만 같은 Alert에 남고, 43%는 다른 Alert로 분리, 20%는 탈락했다</li>
+      <li>정상 씨앗 제거율: 단순 연결 32%, Alert 알고리즘 71%. 탈락한 정상 1,293건 중 1,205건이 구조 없음(<code>NO_STRUCTURE</code>)</li></ul></div>
+    <div class="card"><h3><em>3</em>시간 제한은 이 데이터에서 변수가 아니다</h3><ul>
+      <li>단순 연결에 7일 제한을 걸어도 무제한과 결과가 같고, 4일도 거의 같다 (온전 89.6%). 1일로 줄여야 무너진다 (38.9%)</li>
+      <li>Alert 알고리즘에서 쪼개진 시도 149개 중 조각 사이가 96시간을 넘는 건 3개뿐이고, 145개는 조각끼리 계좌를 공유한다</li>
+      <li>두 방법의 차이는 시간이 아니라 구조 조건에서 나온다</li></ul></div>
+    <div class="card"><h3><em>4</em>Alert 알고리즘의 비용</h3><ul>
+      <li>묶으면서 6종 세탁 558건이 어느 Alert에도 못 들어가고 빠진다 (구조 없음 248, 연결만 147, 크기 상한 129, 셀프이체 33, 기간 상한 1)</li>
+      <li>GATHER-SCATTER에 약하다. 온전 비율 47.6% (단순 연결 86.1%), 쪼개진 시도의 36%가 이 패턴</li>
+      <li>2건짜리 시도에 약하다. 온전 비율 66.0% (단순 연결 94.8%)</li>
+      <li>STACK · BIPARTITE는 구조로 인식하지 못한다 (묶은 뒤 재현율 0.75, 0.11). 이번 평가에서는 제외했다</li></ul></div>
+    <div class="card"><h3><em>5</em>해석할 때 주의할 점</h3><ul>
+      <li>채점 기준이 정답 시도 단위다. 여러 시도가 한 Alert에 든 97개 중 96개는 시도끼리 계좌를 직접 공유한다. 심사 관점에서는 한 사건으로 봐도 되는 경우라, 이 기준은 잘게 끊는 쪽(Alert 알고리즘)에 유리하다</li>
+      <li>합성 데이터(HI-Medium) 결과다. 이진 모델은 같은 생성기로 만든 HI-Large로 학습한 것으로 알고 있어 씨앗 품질이 실제보다 좋을 수 있다</li>
+      <li>임계값 0.195는 HI-Medium에 맞춰 고른 값이 아니고, 씨앗 보강 값(0.1 / 0.01)은 이전 모델 기준 임시값이다. 보강으로 들어온 876건 중 505건이 정상이었다</li>
+      <li>평가 구간이 9일이다. 구간 뒤로 이어지는 시도는 분리해서 봤지만, 구간 앞에서 시작한 시도는 분리하지 않았다</li></ul></div>
+    <div class="card"><h3><em>6</em>결론과 다음 할 일</h3><ul>
+      <li>심사 단위를 만드는 목적이라면 Alert 알고리즘이 낫다. 정상을 더 많이 거르고, 한 Alert가 한 시도에 가깝다</li>
+      <li>다만 탈락한 씨앗이 지금은 버려진다. 단독 Alert로 남길지 정해야 한다 (남기면 재현율 0.983 유지, 대신 정상 1,293건이 같이 돌아온다)</li>
+      <li>GATHER-SCATTER가 어느 구조 규칙에서 쪼개지는지 확인이 필요하다</li>
+      <li>씨앗 보강 값을 현재 모델 기준으로 다시 고를 필요가 있다</li></ul></div>
+  </div>
+</section>
+
+<footer>원본: <code>docs/rule_engine/단순연결vsAlert알고리즘_비교.md</code> · 결과: <code>code/rule_engine/results/HI-Medium</code> · 2026-11-23</footer>
+</main>
+<div id="tip" role="tooltip"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const A = 'Alert 알고리즘', L = '단순 연결';
+const num = v => typeof v === 'number' ? v.toLocaleString('en-US') : v;
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+/* 표: 숫자처럼 보이는 칸은 오른쪽 정렬 */
+function table(el, head, rows, opt = {}) {
+  const isNum = v => typeof v === 'number' || /^[\d,.]+(%|건|개)?$/.test(String(v));
+  const th = head.map((h, i) => `<th${i && !opt.plain ? ' class="n"' : ''}>${h}</th>`).join('');
+  const tr = rows.map(r => {
+    const cls = r.cls ? ` class="${r.cls}"` : '';
+    const cells = (r.c || r).map((v, i) => `<td${i && !opt.plain && (opt.right || isNum(v)) ? ' class="n"' : ''}>${num(v)}</td>`).join('');
+    return `<tr${cls}>${cells}</tr>`;
+  }).join('');
+  $(el).innerHTML = `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody>${opt.caption ? `<caption>${opt.caption}</caption>` : ''}</table>`;
+}
+const sw = (c, t) => `<i class="c-${c}"></i>${t}`;
+
+/* 가로 막대: rows = [{label, sub, bars: [{cls, p(0~1), text, tip}]}] */
+function bars(el, groups, short) {
+  $(el).innerHTML = groups.map(g => (g.title ? `<div class="grp-title">${g.title}</div>` : '') + g.rows.map(r =>
+    `<div class="row"><div class="rl">${r.label}${r.sub ? `<small>${r.sub}</small>` : ''}</div><div class="rb">` +
+    r.bars.map(b => `<div class="bar${short ? ' short' : ''}"><span class="fill c-${b.cls}" style="--p:${b.p}" data-tip="${esc(b.tip)}" tabindex="0"></span><span class="v"><b>${b.text}</b></span></div>`).join('') +
+    `</div></div>`).join('')).join('');
+}
+const pct = v => v.toFixed(1) + '%';
+const pair = (label, a, l, sub, fmt = pct) => ({ label, sub, bars: [
+  { cls: 'alert', p: a / 100, text: fmt(a), tip: `${A}\n${label}: ${fmt(a)}` },
+  { cls: 'link', p: l / 100, text: fmt(l), tip: `${L}\n${label}: ${fmt(l)}` } ] });
+
+/* 한눈에 보기 */
+bars('hero', [
+  { title: '빠짐없이 담는가', rows: [
+    pair('세탁 거래 재현율', 92.4, 97.1, '묶음에 든 6종 세탁 거래'),
+    pair('온전히 한 묶음', 72.7, 90.9, '시도 전체가 한 묶음에'),
+    pair('쌍 재현율', 88.3, 97.2, '같은 시도 거래가 같은 묶음에') ] },
+  { title: '정답 모양대로 끊는가', rows: [
+    pair('거래 정밀도', 94.3, 88.0, '묶음에 든 거래 중 세탁'),
+    pair('정상 씨앗 제거', 71.2, 31.9, '묶으면서 빠진 정상 씨앗'),
+    pair('전부 세탁인 묶음', 79.6, 54.1, '정상이 하나도 안 섞임'),
+    pair('쌍 정밀도', 65.7, 33.8, '같은 묶음 거래가 같은 시도'),
+    pair('정답과 같은 묶음', 52.4, 31.1, '시도와 묶음이 완전히 일치') ] },
+]);
+
+/* 씨앗 보강 구성 */
+(() => {
+  const parts = [['세탁 · 6종', 244, 'laund'], ['세탁 · STACK, BIPARTITE, 무패턴', 127, 'laund-soft'], ['정상', 505, 'normal']];
+  $('promo').innerHTML = parts.map(([n, v, c]) => `<span class="c-${c}" style="flex:${v}" data-tip="${n}\n${v}건 (${(v / 876 * 100).toFixed(1)}%)" tabindex="0"></span>`).join('');
+  $('promokey').style.flexDirection = 'column';
+  $('promokey').innerHTML = parts.map(([n, v, c]) => `<span><i class="c-${c}" style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px"></i>${n} <b>${v}건</b> (${(v / 876 * 100).toFixed(1)}%)</span>`).join('');
+})();
+
+table('t-tail', ['시도의 끝', '시도', '모델이 전부 잡음', `${sw('alert', A)} 온전`, `${sw('link', L)} 온전`], [
+  ['구간 안에 끝남', 840, '93.7%', '73.2%', '93.0%'],
+  ['구간 뒤로 이어짐', 451, '88.7%', '71.6%', '86.9%'] ]);
+
+/* 거래 단위: 단계별 */
+(() => {
+  const S = [['① 모델 씨앗', '임계값 이상', 8890, 1302], ['② 씨앗 보강', '묶기 전', 9134, 1807], ['③ 단순 연결', '묶은 뒤', 9022, 1231], ['③ Alert 알고리즘', '묶은 뒤', 8585, 520]];
+  const max = 11000;
+  $('stages').innerHTML = S.map(([n, sub, l, m]) => `<div class="row"><div class="rl">${n}<small>${sub}</small></div><div class="rb"><div class="bar">` +
+    `<span class="seg c-laund" style="--p:${l / max}" data-tip="${n}\n세탁 ${num(l)}건" tabindex="0"></span>` +
+    `<span class="seg c-normal" style="--p:${m / max}; margin-left:-5px" data-tip="${n}\n정상 ${num(m)}건" tabindex="0"></span>` +
+    `<span class="v">세탁 <b>${num(l)}</b> · 정상 <b>${num(m)}</b></span></div></div></div>`).join('');
+})();
+table('t-stages', ['단계', '고른 거래', '세탁', '정상', '정밀도', '재현율'], [
+  ['① 모델 씨앗', 10192, 8890, 1302, '0.872', '0.957'],
+  ['② 씨앗 보강', 10941, 9134, 1807, '0.835', '0.983'],
+  [`③ ${L}로 묶은 뒤`, 10253, 9022, 1231, '0.880', '0.971'],
+  [`③ ${A}으로 묶은 뒤`, 9105, 8585, 520, '0.943', '0.924'] ]);
+
+/* 패턴별 재현율: 점 그림, 축 0.85 ~ 1.00 */
+(() => {
+  const R = [['CYCLE', 1210, .989, .967, .896], ['FAN-IN', 1324, .965, .950, .920], ['FAN-OUT', 1159, .985, .971, .920],
+             ['GATHER-SCATTER', 2312, .979, .975, .914], ['RANDOM', 982, .992, .965, .918], ['SCATTER-GATHER', 2301, .990, .986, .957]];
+  const lo = .85, hi = 1, x = v => ((v - lo) / (hi - lo) * 100).toFixed(2) + '%';
+  $('recall').innerHTML = R.map(([p, n, s, l, a]) => `<div class="dotrow"><div class="rl">${p}</div><div class="dottrack">` +
+    `<span class="span" style="left:${x(a)}; width:calc(${x(s)} - ${x(a)})"></span>` +
+    `<span class="dot ring" style="left:${x(s)}" data-tip="${p}\n씨앗 (보강 포함): ${s.toFixed(3)}" tabindex="0"></span>` +
+    `<span class="dot c-link" style="left:${x(l)}" data-tip="${p}\n${L}: ${l.toFixed(3)}" tabindex="0"></span>` +
+    `<span class="dot c-alert" style="left:${x(a)}" data-tip="${p}\n${A}: ${a.toFixed(3)}" tabindex="0"></span></div></div>`).join('') +
+    `<div class="axis"><div></div><div>${[.85, .9, .95, 1].map(v => `<span style="left:${x(v)}">${v.toFixed(2)}</span>`).join('')}</div></div>`;
+  table('t-recall', ['패턴', '세탁 거래', '씨앗 보강', sw('link', L), sw('alert', A)], R.map(([p, n, s, l, a]) => [p, n, s.toFixed(3), l.toFixed(3), a.toFixed(3)]));
+})();
+
+/* 못 들어간 씨앗 */
+(() => {
+  const D = [[A, '탈락 1,851건', 558, 1293], [L, '혼자 남음 688건', 112, 576]];
+  const max = 2000;
+  $('dropped').innerHTML = D.map(([n, sub, l, m]) => `<div class="row"><div class="rl">${n}<small>${sub}</small></div><div class="rb"><div class="bar">` +
+    `<span class="seg c-laund" style="--p:${l / max}" data-tip="${n}\n세탁 ${num(l)}건" tabindex="0"></span>` +
+    `<span class="seg c-normal" style="--p:${m / max}; margin-left:-5px" data-tip="${n}\n정상 ${num(m)}건" tabindex="0"></span>` +
+    `<span class="v">세탁 <b>${num(l)}</b> · 정상 <b>${num(m)}</b></span></div></div></div>`).join('');
+})();
+table('t-reason', ['못 들어간 씨앗', 'CYCLE', 'FAN-IN', 'FAN-OUT', 'GATHER-SCATTER', 'RANDOM', 'SCATTER-GATHER', '정상', '합계'], [
+  ['NO_STRUCTURE', 78, 31, 36, 31, 51, 21, 1205, 1453],
+  ['LINK_ONLY', 30, 14, 23, 28, 15, 37, 60, 207],
+  ['CORE_CAP', 6, 15, 17, 58, 7, 26, 14, 143],
+  ['SELF_TRANSFER', 0, 0, 0, 33, 0, 0, 14, 47],
+  ['COMPONENT_SPAN', 1, 0, 0, 0, 0, 0, 0, 1],
+  { cls: 'sum', c: [`${sw('alert', A)} 합계`, 115, 60, 76, 150, 73, 84, 1293, 1851] },
+  { cls: 'sum', c: [`${sw('link', L)} 혼자 남은 씨앗`, 27, 20, 17, 11, 26, 11, 576, 688] } ],
+  { caption: '위 다섯 줄은 Alert 알고리즘의 사유별 건수다.' });
+
+/* 묶음 구성 */
+(() => {
+  const K = [['전부 세탁', 'laund'], ['섞임 (세탁이 절반 이상)', 'laund-soft'], ['섞임 (정상이 더 많음)', 'normal-soft'], ['전부 정상', 'normal']];
+  const C = [[A, 1273, [1013, 212, 4, 44]], [L, 965, [522, 425, 2, 16]]];
+  $('comp').innerHTML = C.map(([n, tot, v]) => `<div class="stackrow"><div class="sl"><b>${n}</b><span>${num(tot)}개</span></div><div class="stack">` +
+    v.map((x, i) => `<span class="c-${K[i][1]}" style="flex:${x}" data-tip="${n}\n${K[i][0]}: ${num(x)}개 (${(x / tot * 100).toFixed(1)}%)" tabindex="0"></span>`).join('') +
+    `</div><div class="stackkey"><span>전부 세탁 <b>${(v[0] / tot * 100).toFixed(1)}%</b></span><span>섞임 <b>${((v[1] + v[2]) / tot * 100).toFixed(1)}%</b></span><span>전부 정상 <b>${(v[3] / tot * 100).toFixed(1)}%</b></span></div></div>`).join('');
+  table('t-comp', ['구분', sw('alert', A), '비율', sw('link', L), '비율'], K.map(([k], i) =>
+    [k, C[0][2][i], (C[0][2][i] / 1273 * 100).toFixed(1) + '%', C[1][2][i], (C[1][2][i] / 965 * 100).toFixed(1) + '%']).concat([{ cls: 'sum', c: ['합계', 1273, '100%', 965, '100%'] }]));
+})();
+
+/* 한 묶음에 든 시도 수 */
+(() => {
+  const M = [['2개', 50, 50], ['3개', 12, 15], ['4 ~ 5개', 11, 14], ['6 ~ 10개', 10, 21], ['11개 이상', 14, 23]];
+  bars('mix', [{ rows: M.map(([k, a, l]) => ({ label: `시도 ${k}`, bars: [
+    { cls: 'alert', p: a / 55, text: a + '개', tip: `${A}\n시도 ${k}가 든 묶음: ${a}개` },
+    { cls: 'link', p: l / 55, text: l + '개', tip: `${L}\n시도 ${k}가 든 묶음: ${l}개` } ] })) }], true);
+  table('t-mix', ['한 묶음에 든 시도', sw('alert', A), sw('link', L)], [['1개', 1132, 826]].concat(M.map(([k, a, l]) => [k, a, l])).concat([
+    { cls: 'sum', c: ['2개 이상', '97개 (7.9%)', '123개 (13.0%)'] }, { cls: 'dim', c: ['가장 많이 든 묶음', '시도 20개', '시도 26개'] } ]),
+    { right: true, caption: '6종 세탁이 든 묶음 기준. Alert 알고리즘 1,229개, 단순 연결 949개.' });
+})();
+table('t-normal', ['', sw('alert', A), sw('link', L)], [
+  ['전부 정상인 묶음', '44개', '16개'],
+  ['그 안의 거래', '95건', '39건'],
+  ['크기', '2건 39개 · 3건 3개 · 4건 2개', '2건 10개 · 3건 5개 · 4건 1개'],
+  ['구성', '모델 씨앗 58 · 보강 씨앗 36 · 연결 거래 1', '모델 씨앗 18 · 보강 씨앗 21'],
+  ['정상이 섞인 묶음', '216개', '427개'],
+  ['섞인 정상 거래', '369건', '934건'] ], { plain: true });
+
+/* 정답 시도와 비교 */
+table('t-truth', ['지표', sw('alert', A), `${sw('link', L)} 무제한`, '7일 이내', '4일 이내', '1일 이내'], [
+  ['온전히 한 묶음', '72.7%', '90.9%', '90.9%', '89.6%', '38.9%'],
+  ['평균 최대 포함률', '0.877', '0.975', '0.975', '0.968', '0.724'],
+  ['쪼개진 시도', 139, 7, 7, 14, 506],
+  ['전혀 안 묶인 시도', 55, 12, 12, 17, 69],
+  ['쌍 정밀도', '0.657', '0.338', '0.340', '0.354', '0.321'],
+  ['쌍 재현율', '0.883', '0.972', '0.972', '0.969', '0.559'],
+  ['묶음의 세탁 비율', '0.950', '0.897', '0.898', '0.902', '0.910'],
+  ['최대 묶음 크기', '62건', '176건', '176건', '176건', '176건'] ]);
+
+bars('time', [{ rows: [['무제한', 90.9], ['7일 이내', 90.9], ['4일 이내', 89.6], ['1일 이내', 38.9]].map(([k, v]) => ({ label: k, sub: L, bars: [
+  { cls: 'link', p: v / 100, text: pct(v), tip: `${L} · ${k}\n온전 비율 ${pct(v)}` }] }))
+  .concat([{ label: A, sub: '서비스 설정 그대로', bars: [{ cls: 'alert', p: .727, text: '72.7%', tip: `${A}\n온전 비율 72.7%` }] }]) }], true);
+
+table('t-same', ['지표', sw('alert', A), sw('link', L)], [
+  ['정답과 완전히 같은 묶음', '52.4%', '31.1%'],
+  ['평균 자카드', '0.714', '0.614'],
+  ['다른 거래가 안 섞임', '63.7%', '34.5%'],
+  ['다른 시도와 한 묶음이 됨', '22.7%', '43.3%'],
+  ['섞인 거래 평균', '8.7건', '19.9건'] ],
+  { caption: '자카드 = 정답 시도와 묶음에 둘 다 있는 거래 수 ÷ 어느 한쪽에라도 있는 거래 수. 1이면 완전히 같다. 04번 시각화 데이터로 계산.' });
+
+(() => {
+  const P = [['CYCLE', 236, .758, .949, .924, .403], ['FAN-IN', 209, .756, .833, .823, .349], ['FAN-OUT', 183, .825, .945, .929, .508],
+             ['GATHER-SCATTER', 267, .476, .861, .854, .363], ['RANDOM', 168, .833, .964, .952, .327], ['SCATTER-GATHER', 228, .803, .921, .917, .390]];
+  bars('bypat', [{ rows: P.map(([p, n, a, l]) => pair(p, a * 100, l * 100, `시도 ${n}개`)) }], true);
+  table('t-bypat', ['패턴', '시도', sw('alert', 'Alert'), sw('link', '무제한'), sw('link', '4일'), sw('link', '1일')], P.map(([p, n, a, l, d4, d1]) => [p, n, a.toFixed(3), l.toFixed(3), d4.toFixed(3), d1.toFixed(3)]),
+    { caption: '패턴별 온전 비율. 무제한 · 4일 · 1일은 단순 연결의 시간 제한이다.' });
+  const Z = [['2건', 291, .660, .948, .656], ['3 ~ 5건', 371, .782, .938, .464], ['6 ~ 10건', 376, .750, .899, .271], ['11 ~ 20건', 218, .674, .839, .151], ['21건 이상', 35, .771, .800, .114]];
+  bars('bysize', [{ rows: Z.map(([k, n, a, l]) => pair(k, a * 100, l * 100, `시도 ${n}개`)) }], true);
+  table('t-bysize', ['시도 크기', '시도', sw('alert', 'Alert'), sw('link', '무제한'), sw('link', '1일')], Z.map(([k, n, a, l, d1]) => [k, n, a.toFixed(3), l.toFixed(3), d1.toFixed(3)]),
+    { caption: '시도 크기별 온전 비율. 크기는 평가 구간 안 거래 수다.' });
+})();
+
+/* 말풍선 */
+(() => {
+  const tip = $('tip');
+  const show = (t, x, y) => { tip.textContent = t.dataset.tip; tip.classList.add('on');
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, x + 12)) + 'px';
+    tip.style.top = (y + h + 24 > innerHeight ? y - h - 10 : y + 14) + 'px'; };
+  document.addEventListener('mousemove', e => { const t = e.target.closest?.('[data-tip]'); t ? show(t, e.clientX, e.clientY) : tip.classList.remove('on'); });
+  document.addEventListener('focusin', e => { const t = e.target.closest?.('[data-tip]'); if (t) { const r = t.getBoundingClientRect(); show(t, r.left + r.width / 2, r.bottom); } });
+  document.addEventListener('focusout', () => tip.classList.remove('on'));
+})();
+</script>
+</body>
+</html>
