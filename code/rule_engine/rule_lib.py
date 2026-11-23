@@ -545,7 +545,8 @@ def method_metrics(name, chosen, frame, window):
 
 def rule_metrics(frame, window, hits):
     """룰별 결과. hits: {패턴 이름: bool 배열} (그 룰이 고른 거래). sweep 과 같은 정의다.
-    정밀도 = 고른 거래 중 세탁(패턴 종류 무관) 비율, 재현율 = 그 룰이 노리는 패턴의 세탁 거래 중 고른 비율"""
+    정밀도 = 고른 거래 중 세탁(패턴 종류 무관) 비율, 재현율 = 그 룰이 노리는 패턴의 세탁 거래 중 고른 비율
+    패턴_세탁 = 구간 안 그 패턴의 세탁 거래 수(재현율의 분모), 패턴_고름 = 그중 고른 수"""
     y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
     rows = []
     for label, mask in hits.items():
@@ -554,7 +555,8 @@ def rule_metrics(frame, window, hits):
         own_total = int((window & (kind == label)).sum())
         own = int((chosen & (kind == label)).sum())
         precision, recall = laundering / max(picked, 1), own / max(own_total, 1)
-        rows.append(dict(룰=label, 고른_거래=picked, 세탁=laundering, 정밀도=round(precision, 4), 재현율=round(recall, 4),
+        rows.append(dict(룰=label, 고른_거래=picked, 세탁=laundering, 정밀도=round(precision, 4),
+                         패턴_세탁=own_total, 패턴_고름=own, 재현율=round(recall, 4),
                          F1=round(2 * precision * recall / max(precision + recall, 1e-12), 4)))
     return pd.DataFrame(rows)
 
