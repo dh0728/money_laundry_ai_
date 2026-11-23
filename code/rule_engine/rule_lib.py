@@ -3,7 +3,7 @@
 모델 점수를 전혀 쓰지 않고 원장(거래 표)에 패턴 룰 6종을 직접 돌린다. 계산은 DuckDB 안에서 한다.
 
 룰 하나는 조건 여러 개를 AND 로 묶은 것이다.
-  ① 거래 필터    : 룰이 세는 거래를 먼저 거른다 (건당 최소 금액, 처음 거래하는 상대만). apply_filter()
+  ① 거래 필터    : 룰이 세는 거래를 먼저 거른다 (건당 최소 금액, 처음 거래하는 상대만, 환전 직후 송금). apply_filter()
   ② 기간         : 트리거 시각을 포함한 직전 W 분. 원장이 분 단위라 [t0 - (W-1)분, t0]
   ③ 세기 ≥ 조건값 : 기간 안에서 센 패턴의 크기
   ④ (FAN 만) 반복 없음: 기간 안 거래 수 = 상대 계좌 수. 같은 상대와 두 번 이상 거래하지 않았다는 뜻
@@ -21,7 +21,7 @@
 세기를 저장해 두므로 조건값을 바꿀 때 룰을 다시 돌리지 않고 걸러 보기만 하면 된다.
 
 공통 규칙
-  - 자기 자신에게 보낸 거래(src = dst)는 룰이 보지 않는다.
+  - 자기 자신에게 보낸 거래(src = dst)는 룰이 보지 않는다. 다만 그중 환전 거래는 "환전 직후 송금"(열 fx_pair)을 표시하는 데 쓴다.
   - 바쁜 계좌(busy 표)는 대상도 경유도 되지 않는다. 상대 계좌로는 센다.
   - 금액은 보낸 금액을 서비스 고정 환율로 바꾼 USD 다 (gen_lib.UNITS_PER_USD).
   - 지표에서 빼는 세탁(load_tx 의 exclude, 열 skip)은 **정답도 오답도 아닌 것으로 두고 뺀다.**
@@ -35,6 +35,7 @@
 
 검증: HI-Small 에서 여섯 룰의 SQL 결과가 같은 정의를 Python 반복문으로 그대로 짠 계산과 일치하는 것을 확인했다(2026-11-23).
       FAN(반복 없음 포함)·GATHER-SCATTER 는 무작위 계좌 400개씩, SCATTER-GATHER 와 경로형은 전체.
+      환전 직후 송금(fx_pair)도 HI-Small 전체에서 Python 반복문으로 다시 계산한 것과 일치했다(69,508건, 2026-11-23).
 """
 import time
 
@@ -87,15 +88,18 @@ def _between(window):
 
 
 # ----------------------------------------------------------------------------- 거래 올리기
-def load_tx(con, base, start, end, units_per_usd, exclude=()):
+def load_tx(con, base, start, end, units_per_usd, exclude=(), fx_ratio=(0.8, 1.25)):
     """[start, end] 날짜의 거래를 DuckDB 표로 올린다.
 
     tx_all : 읽은 거래 전부. 지표는 여기서 센다
     tx     : 룰이 보는 거래. 자기 자신에게 보낸 거래를 뺀 것 (뷰)
     exclude: 지표에서 빼는 세탁의 pattern_type 목록 (예: ['NO_PATTERN', 'STACK', 'BIPARTITE'])
-    열     : edge_id, ts, day, src, dst, usd, y, pattern_type, attempt_id, first_pair, skip
+    fx_ratio: 환전 직후 송금으로 보는 금액 비(보낸 금액 ÷ 환전해 받은 금액)의 (최소, 최대)
+    열     : edge_id, ts, day, src, dst, usd, y, pattern_type, attempt_id, first_pair, fx_pair, skip
              pattern_type 은 정상이면 '', 패턴 파일에 없는 세탁이면 'NO_PATTERN'
              first_pair 는 그 (송금 계좌, 수취 계좌) 쌍의 첫 거래인가. 읽는 기간이 아니라 **데이터 처음부터 end 까지** 전체에서 본다
+             fx_pair 는 환전 직후 송금인가. 같은 계좌가 **같은 시각(분)** 에 자기 계좌 안에서 환전했고(src = dst, 보낸 통화 ≠ 받은 통화),
+                     그 환전으로 받은 통화가 이 거래의 보낸 통화와 같고, 보낸 금액 ÷ 환전해 받은 금액이 fx_ratio 안이다. 자기 자신에게 보낸 거래는 False
              skip 은 지표에서 빼는 거래인가 (세탁이고 pattern_type 이 exclude 에 있다). 룰은 이 거래도 그대로 본다
     """
     excluded = ', '.join("'" + kind.replace("'", "''") + "'" for kind in exclude) or "'(없음)'"
@@ -107,22 +111,32 @@ def load_tx(con, base, start, end, units_per_usd, exclude=()):
         WITH pat AS (SELECT edge_id, min(attempt_id) AS attempt_id, arg_min(pattern_type, attempt_id) AS pattern_type
                      FROM read_parquet('{base / 'patterns.parquet'}') WHERE edge_id IS NOT NULL GROUP BY edge_id),
         pair AS (SELECT arg_min(edge_id, (ts, edge_id)) AS edge_id FROM {source}        -- 그 쌍에서 시각이 가장 이른 거래 (같으면 edge_id 가 작은 쪽)
-                 WHERE day <= DATE '{end}' AND src <> dst GROUP BY src, dst)
+                 WHERE day <= DATE '{end}' AND src <> dst GROUP BY src, dst),
+        swap AS (SELECT DISTINCT src AS a, ts, receiving_currency AS currency, received AS amount FROM {source}      -- 자기 계좌 안 환전
+                 WHERE day BETWEEN DATE '{start}' AND DATE '{end}' AND src = dst AND payment_currency <> receiving_currency AND received > 0),
+        fx AS (SELECT DISTINCT t.edge_id FROM {source} t JOIN swap s                                                -- 그 환전과 같은 시각 · 같은 통화 · 비슷한 금액으로 남에게 보낸 거래
+                 ON s.a = t.src AND s.ts = t.ts AND s.currency = t.payment_currency
+                AND t.paid BETWEEN s.amount * {fx_ratio[0]} AND s.amount * {fx_ratio[1]}
+               WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}' AND t.src <> t.dst)
         SELECT t.edge_id, t.ts, t.day, t.src, t.dst, round(t.paid / f.units, 6) AS usd,
                CAST(t.is_laundering AS TINYINT) AS y,
                CASE WHEN t.is_laundering THEN coalesce(p.pattern_type, 'NO_PATTERN') ELSE '' END AS pattern_type,
                CASE WHEN t.is_laundering THEN p.attempt_id END AS attempt_id,
                pair.edge_id IS NOT NULL AS first_pair,
+               fx.edge_id IS NOT NULL AS fx_pair,
                t.is_laundering AND coalesce(p.pattern_type, 'NO_PATTERN') IN ({excluded}) AS skip
         FROM {source} t
         LEFT JOIN fx_rates f ON f.currency = t.payment_currency
         LEFT JOIN pat p USING (edge_id)
         LEFT JOIN pair USING (edge_id)
+        LEFT JOIN fx USING (edge_id)
         WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}'""")
     _view(con, 'tx', 'SELECT * FROM tx_all WHERE src <> dst')
-    n, first, last, unknown, skip = con.execute(
-        'SELECT count(*), min(ts), max(ts), count(*) FILTER (WHERE usd IS NULL), count(*) FILTER (WHERE skip) FROM tx_all').fetchone()
-    return dict(읽은_거래=n, 룰이_보는_거래=_rows(con, 'tx'), 시작=str(first), 끝=str(last), 환율_모르는_거래=unknown, 지표에서_뺀_세탁=skip)
+    n, first, last, unknown, skip, fx = con.execute(
+        '''SELECT count(*), min(ts), max(ts), count(*) FILTER (WHERE usd IS NULL), count(*) FILTER (WHERE skip),
+                  count(*) FILTER (WHERE fx_pair) FROM tx_all''').fetchone()
+    return dict(읽은_거래=n, 룰이_보는_거래=_rows(con, 'tx'), 시작=str(first), 끝=str(last), 환율_모르는_거래=unknown, 지표에서_뺀_세탁=skip,
+                환전_직후_송금=fx)
 
 
 def busy_accounts(con, busy_max, busy_minutes):
@@ -144,20 +158,40 @@ def busy_accounts(con, busy_max, busy_minutes):
     return dict(바쁜_계좌=_rows(con, 'busy'), 바쁜_계좌에_닿은_거래=touched, 그중_세탁=int(laundering))
 
 
-def apply_filter(con, tag, min_usd, first_only):
+FX_MODES = {None: '', 'and': 'x', 'or': 'o'}      # 환전 조건을 쓰는 방식 → 필터 꼬리표에 붙는 글자
+
+
+def filter_tag(min_usd, first_only, fx=None):
+    """필터 설정 → 표 이름에 붙는 꼬리표. 예: (1000, True) → m1000f, (1000, True, 'and') → m1000fx, (0, True, 'or') → m0fo"""
+    return f"m{min_usd}{'f' if first_only else 'a'}{FX_MODES[fx]}"
+
+
+def apply_filter(con, tag, min_usd, first_only, fx=None):
     """거래 필터 하나를 건다. 룰은 이 필터를 통과한 거래만 세고, 근거 거래도 그 안에서만 나온다.
 
     min_usd    : 건당 최소 금액(USD). 이보다 작은 거래는 세지 않는다
     first_only : True 면 그 (송금 계좌, 수취 계좌) 쌍의 첫 거래만 센다 = 처음 거래하는 상대
+    fx         : 환전 직후 송금(열 fx_pair) 조건을 쓰는 방식
+                 None  = 쓰지 않는다
+                 'and' = 다른 조건에 AND 로 붙인다. 환전 직후 송금만 센다
+                 'or'  = '처음 거래하는 상대' 와 OR 로 묶는다. 첫 거래이거나 환전 직후 송금이면 센다 (first_only = True 일 때만 쓴다)
+                 건당 최소 금액은 어느 방식에서든 AND 다
     만드는 것  : tx_<tag> (필터를 통과한 거래, 뷰), txn_<tag> (그중 양쪽 어디에도 바쁜 계좌가 없는 거래, 표)
     """
-    where = f'usd >= {min_usd}' + (' AND first_pair' if first_only else '')
-    _view(con, f'tx_{tag}', f'SELECT * FROM tx WHERE {where}')
+    assert fx in FX_MODES, f'fx 는 {list(FX_MODES)} 중 하나'
+    assert fx != 'or' or first_only, "fx='or' 는 '처음 거래하는 상대' 와 묶는 것이라 first_only = True 여야 한다"
+    conditions = [f'usd >= {min_usd}']
+    if fx == 'or':
+        conditions.append('(first_pair OR fx_pair)')
+    else:
+        conditions += ['first_pair'] * bool(first_only) + ['fx_pair'] * (fx == 'and')
+    _view(con, f'tx_{tag}', f"SELECT * FROM tx WHERE {' AND '.join(conditions)}")
     con.execute(f"""CREATE OR REPLACE TABLE txn_{tag} AS
                     SELECT * FROM tx_{tag} WHERE src NOT IN (SELECT a FROM busy) AND dst NOT IN (SELECT a FROM busy)""")
     n, laundering, patterned = con.execute(f"""SELECT count(*), coalesce(sum(y), 0),
         count(*) FILTER (WHERE pattern_type IN ({', '.join(repr(v) for v in RULES.values())})) FROM tx_{tag}""").fetchone()
-    return dict(tag=tag, 건당_최소_USD=min_usd, 첫_거래만=first_only, 남은_거래=n, 그중_세탁=int(laundering), 그중_6종_패턴_세탁=patterned)
+    return dict(tag=tag, 건당_최소_USD=min_usd, 첫_거래만=first_only, 환전={None: '—', 'and': 'AND', 'or': 'OR'}[fx],
+                남은_거래=n, 그중_세탁=int(laundering), 그중_6종_패턴_세탁=patterned)
 
 
 # ----------------------------------------------------------------------------- ①② FAN-OUT · FAN-IN (집계형)
@@ -467,14 +501,15 @@ def chosen_rows(table, chosen):
 # ----------------------------------------------------------------------------- 고른 조건의 결과 모으기
 def collect(con, chosen, filters, start, end):
     """[start, end] 날짜의 거래(tx_all)에, 고른 조건(chosen)에서 룰마다 걸렸는지(True / False)를 붙여 가져온다.
-    열 이름은 패턴 이름('FAN-OUT', ...)이다. 지표에서 빼는 거래도 들어 있다(열 skip). 지표는 day_mask 로 만든 구간 안에서만 센다."""
+    열 이름은 패턴 이름('FAN-OUT', ...)이다. 지표에서 빼는 거래도 들어 있다(열 skip). 지표는 day_mask 로 만든 구간 안에서만 센다.
+    fx_pair 는 환전 직후 송금인가(load_tx). 줄 순서는 chosen 과 무관하게 같다(시각, edge_id 순)."""
     selects, joins = [], []
     for rule, c in chosen.items():
         column = REPEAT.get(c['반복'], 'v')
         selects.append(f"coalesce({rule}.{column} >= {c['조건값']}, false) AS \"{RULES[rule]}\"")
         joins.append(f"LEFT JOIN {rule}_{c['기간_분']}_{filters[c['필터']]} AS {rule} USING (edge_id)")
     return con.execute(f"""
-        SELECT {', '.join(['t.edge_id', 't.day', 't.y', 't.pattern_type', 't.attempt_id', 't.skip', *selects])}
+        SELECT {', '.join(['t.edge_id', 't.day', 't.y', 't.pattern_type', 't.attempt_id', 't.skip', 't.fx_pair', *selects])}
         FROM tx_all t {' '.join(joins)}
         WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}'
         ORDER BY t.ts, t.edge_id""").df()
@@ -506,6 +541,22 @@ def method_metrics(name, chosen, frame, window):
     if targeted.sum() != positive.sum():
         row['재현율_룰이_있는_6종'] = round(int((chosen & targeted).sum()) / max(int(targeted.sum()), 1), 4)
     return row
+
+
+def rule_metrics(frame, window, hits):
+    """룰별 결과. hits: {패턴 이름: bool 배열} (그 룰이 고른 거래). sweep 과 같은 정의다.
+    정밀도 = 고른 거래 중 세탁(패턴 종류 무관) 비율, 재현율 = 그 룰이 노리는 패턴의 세탁 거래 중 고른 비율"""
+    y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
+    rows = []
+    for label, mask in hits.items():
+        chosen = mask & window
+        picked, laundering = int(chosen.sum()), int((chosen & (y == 1)).sum())
+        own_total = int((window & (kind == label)).sum())
+        own = int((chosen & (kind == label)).sum())
+        precision, recall = laundering / max(picked, 1), own / max(own_total, 1)
+        rows.append(dict(룰=label, 고른_거래=picked, 세탁=laundering, 정밀도=round(precision, 4), 재현율=round(recall, 4),
+                         F1=round(2 * precision * recall / max(precision + recall, 1e-12), 4)))
+    return pd.DataFrame(rows)
 
 
 def by_pattern(frame, window, methods):
