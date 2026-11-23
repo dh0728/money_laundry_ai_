@@ -20,7 +20,7 @@
 
 세기를 저장해 두므로 조건값을 바꿀 때 룰을 다시 돌리지 않고 걸러 보기만 하면 된다.
 표에는 그 거래를 고르게 한 대상 계좌(subj)도 같이 들어 있다. hit_groups() 가 이것으로 고른 거래를 "적중 묶음"으로 나눈다.
-05번은 그 묶음으로 생성기 없이 Alert 를 만든다(merge_groups, compare_alerts).
+05번은 그 묶음으로 생성기 없이 Alert 를 만든다(expand_groups, merge_groups, compare_alerts).
 
 공통 규칙
   - 자기 자신에게 보낸 거래(src = dst)는 룰이 보지 않는다. 다만 그중 환전 거래는 "환전 직후 송금"(열 fx_pair)을 표시하는 데 쓴다.
@@ -590,6 +590,42 @@ def merge_groups(groups):
     same = edge[1:] == edge[:-1]                                                # 같은 거래가 든 두 묶음
     root = _components(int(hit.max()) + 1 if len(hit) else 0, h[:-1][same], h[1:][same])
     return pd.factorize(root[hit])[0]
+
+
+def expand_groups(groups, ledger):
+    """적중 묶음을 "대상 계좌의 주변 거래"로 넓힌다. 룰이 대상을 찾은 뒤에는 필터(금액 · 첫거래 · 환전)와 무관하게 그 대상의 거래를 Alert 에 넣는다는 뜻이다.
+
+    groups : DataFrame[edge_id, 룰, 대상, 묶음, ts, src, dst]. 근거 거래 (hit_groups 에 시각과 계좌를 붙인 것)
+    ledger : DataFrame[edge_id, ts, src, dst]. 넓힐 때 볼 거래. 자기 자신에게 보낸 거래는 빼고 준다
+    기간   : 묶음마다 첫 근거 거래 시각 ~ 마지막 근거 거래 시각 (양 끝 포함). 그 밖의 거래는 넣지 않는다
+    넣는 거래
+      FAN-OUT        : 대상 계좌가 보낸 거래
+      FAN-IN         : 대상 계좌가 받은 거래
+      GATHER-SCATTER : 대상(가운데) 계좌가 받은 거래와 보낸 거래
+      SCATTER-GATHER : 경유 계좌 → 도착 계좌 거래, 출발 계좌 → 경유 계좌 거래. 경유 · 출발 계좌는 그 묶음의 근거 거래에서 읽는다
+      CYCLE · RANDOM : 넓히지 않는다 (경로에는 "대상 계좌의 거래" 라고 할 것이 없다)
+    반환   : DataFrame[edge_id, 룰, 대상, 묶음, 근거]. 근거 = 원래 근거 거래인가. 한 룰 안에서도 같은 거래가 여러 묶음에 들 수 있다
+    """
+    key = ['룰', '묶음']
+    span = groups.groupby(key).agg(대상=('대상', 'first'), t0=('ts', 'min'), t1=('ts', 'max')).reset_index()
+
+    def within(frame):
+        return frame.loc[(frame.ts >= frame.t0) & (frame.ts <= frame.t1), ['edge_id', *key, '대상']]
+
+    ledger = ledger[['edge_id', 'ts', 'src', 'dst']]
+    parts = [groups[['edge_id', *key, '대상']]]
+    parts.append(within(ledger.merge(span[span.룰.isin(['FAN-OUT', 'GATHER-SCATTER'])], left_on='src', right_on='대상')))
+    parts.append(within(ledger.merge(span[span.룰.isin(['FAN-IN', 'GATHER-SCATTER'])], left_on='dst', right_on='대상')))
+    sg = groups[groups.룰 == 'SCATTER-GATHER']
+    mids = sg.loc[sg.dst == sg.대상, [*key, 'src']].drop_duplicates().rename(columns={'src': 'mid'})          # 묶음의 경유 계좌
+    origins = (sg.merge(mids, left_on=[*key, 'dst'], right_on=[*key, 'mid'])[[*key, 'src', 'mid']]
+               .drop_duplicates().rename(columns={'src': 'origin'}))                                         # (출발 계좌, 경유 계좌)
+    sg_span = span[span.룰 == 'SCATTER-GATHER']
+    parts.append(within(ledger.merge(mids.merge(sg_span, on=key), left_on=['src', 'dst'], right_on=['mid', '대상'])))
+    parts.append(within(ledger.merge(origins.merge(sg_span, on=key), left_on=['src', 'dst'], right_on=['origin', 'mid'])))
+    wide = pd.concat(parts, ignore_index=True).drop_duplicates(['edge_id', *key]).reset_index(drop=True)
+    wide['근거'] = pd.MultiIndex.from_frame(wide[['edge_id', *key]]).isin(pd.MultiIndex.from_frame(groups[['edge_id', *key]]))
+    return wide
 
 
 def compare_alerts(name, groups, attempt_of, eval_attempts, truth):
