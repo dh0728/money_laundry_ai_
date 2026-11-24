@@ -1,0 +1,80 @@
+{
+  "dataset": "HI-Medium",
+  "gen_run": "before_after_grouping",
+  "rule_run": "rule_vs_model",
+  "test_window": [
+    "2022-09-08",
+    "2022-09-16"
+  ],
+  "pad_days": 14,
+  "exclude": [
+    "STACK",
+    "BIPARTITE"
+  ],
+  "generator_commit": "ce5b429 2026-11-19 Merge pull request #227 from dh0728/backend",
+  "same_as_01": true,
+  "info": {
+    "M 모델": {
+      "policy": "block-pin-3",
+      "index_seconds": 87.9,
+      "build_seconds": 7.1,
+      "edge_visits": 1360537,
+      "graphs": 2051,
+      "unassigned": 3344
+    },
+    "R 룰": {
+      "policy": "block-pin-3",
+      "index_seconds": 86.7,
+      "build_seconds": 1.7,
+      "edge_visits": 676413,
+      "graphs": 918,
+      "unassigned": 330
+    },
+    "MR 모델 + 룰": {
+      "policy": "block-pin-3",
+      "index_seconds": 84.8,
+      "build_seconds": 7.5,
+      "edge_visits": 1416810,
+      "graphs": 2128,
+      "unassigned": 3428
+    }
+  },
+  "chosen": {
+    "fan_out": {
+      "필터": "첫거래+1천↑",
+      "반복": "허용",
+      "기간_분": 10080,
+      "조건값": 6
+    },
+    "fan_in": {
+      "필터": "첫거래+환전",
+      "반복": "허용",
+      "기간_분": 10080,
+      "조건값": 3
+    },
+    "gather_scatter": {
+      "필터": "첫거래+5천↑",
+      "반복": "—",
+      "기간_분": 10080,
+      "조건값": 2
+    },
+    "scatter_gather": {
+      "필터": "1천↑",
+      "반복": "—",
+      "기간_분": 10080,
+      "조건값": 4
+    },
+    "cycle": {
+      "필터": "없음",
+      "반복": "—",
+      "기간_분": 10080,
+      "조건값": 3
+    },
+    "random": {
+      "필터": "(첫거래 또는 환전)+1천↑",
+      "반복": "—",
+      "기간_분": 4320,
+      "조건값": 3
+    }
+  }
+}
