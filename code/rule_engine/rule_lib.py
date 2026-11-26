@@ -1,0 +1,769 @@
+"""패턴 룰 실험 공통 도구 (03_rule_vs_model, 05_rule_alerts).
+
+모델 점수를 전혀 쓰지 않고 원장(거래 표)에 패턴 룰 6종을 직접 돌린다. 계산은 DuckDB 안에서 한다.
+
+룰 하나는 조건 여러 개를 AND 로 묶은 것이다.
+  ① 거래 필터    : 룰이 세는 거래를 먼저 거른다 (건당 최소 금액, 처음 거래하는 상대만, 환전 직후 송금). apply_filter()
+  ② 기간         : 트리거 시각을 포함한 직전 W 분. 원장이 분 단위라 [t0 - (W-1)분, t0]
+  ③ 세기 ≥ 조건값 : 기간 안에서 센 패턴의 크기
+  ④ (FAN 만) 반복 없음: 기간 안 거래 수 = 상대 계좌 수. 같은 상대와 두 번 이상 거래하지 않았다는 뜻
+
+룰마다 "거래별 세기" 표 <룰>_<W>_<필터 tag> 를 만든다. 세기가 조건값 이상인 거래가 그 조건에서 룰이 고른 거래(근거 거래)다.
+
+  표                   v(세기)의 뜻
+  fan_out_*            그 거래를 담는 기간들 중, 서로 다른 수취 계좌 수의 최댓값 (v_once: 반복 없음 조건을 건 값)
+  fan_in_*             서로 다른 송금 계좌 수의 최댓값 (v_once 동일)
+  gather_scatter_*     min(송금 계좌 수, 첫 입금 뒤 수취 계좌 수)의 최댓값
+  scatter_gather_*     경유 계좌 수의 최댓값
+  cycle_*              그 거래가 든 순환 중 가장 긴 것의 거래 수
+  random_*             그 거래가 든 (돌아오지 않는) 경로 중 가장 긴 것의 거래 수
+
+세기를 저장해 두므로 조건값을 바꿀 때 룰을 다시 돌리지 않고 걸러 보기만 하면 된다.
+표에는 그 거래를 고르게 한 대상 계좌(subj)도 같이 들어 있다. hit_groups() 가 이것으로 고른 거래를 "적중 묶음"으로 나눈다.
+05번은 그 묶음으로 생성기 없이 Alert 를 만든다(expand_groups, merge_groups, compare_alerts).
+
+공통 규칙
+  - 자기 자신에게 보낸 거래(src = dst)는 룰이 보지 않는다. 다만 그중 환전 거래는 "환전 직후 송금"(열 fx_pair)을 표시하는 데 쓴다.
+  - 바쁜 계좌(busy 표)는 대상도 경유도 되지 않는다. 상대 계좌로는 센다.
+  - 금액은 보낸 금액을 서비스 고정 환율로 바꾼 USD 다 (gen_lib.UNITS_PER_USD).
+  - 지표에서 빼는 세탁(load_tx 의 exclude, 열 skip)은 **정답도 오답도 아닌 것으로 두고 뺀다.**
+    룰은 원장 전체를 그대로 보지만, 이 거래는 고른 거래 수에도 세탁 수에도 분모에도 들어가지 않는다.
+
+큰 데이터(HI-Large)용 장치
+  - REUSE = True 로 두면 이미 있는 룰 표는 다시 만들지 않는다. 중간에 끊긴 실행을 이어 돌릴 때만 쓴다(파일 DB 일 때만 의미가 있다).
+    설정(필터 · 금액 비 · 바쁜 계좌 기준 · 날짜)을 바꿨으면 반드시 False 로 돌린다.
+  - 경로형은 경로 수 상한이 max_walks 를 넘으면 만들지 않고 건너뛴다(rule_skipped 표에 적는다).
+  - sweep · pick 은 표가 없거나 건너뛴 (룰, 필터, 기간)을 빼고 계산한다.
+
+검증: HI-Small 에서 여섯 룰의 SQL 결과가 같은 정의를 Python 반복문으로 그대로 짠 계산과 일치하는 것을 확인했다(2026-11-23).
+      FAN(반복 없음 포함)·GATHER-SCATTER 는 무작위 계좌 400개씩, SCATTER-GATHER 와 경로형은 전체.
+      환전 직후 송금(fx_pair)도 HI-Small 전체에서 Python 반복문으로 다시 계산한 것과 일치했다(69,508건, 2026-11-23).
+"""
+import time
+
+import numpy as np
+import pandas as pd
+
+RULES = {'fan_out': 'FAN-OUT', 'fan_in': 'FAN-IN', 'gather_scatter': 'GATHER-SCATTER',      # 룰 이름 → Patterns 파일의 패턴 이름
+         'scatter_gather': 'SCATTER-GATHER', 'cycle': 'CYCLE', 'random': 'RANDOM'}
+REPEAT = {'허용': 'v', '없음': 'v_once'}          # FAN 의 '반복' 조건 → 세기 열
+KEYS = ['룰', '필터', '반복', '기간_분', '조건값']   # 조건 한 벌을 가리키는 열
+REUSE = False                                    # True 면 이미 있는 룰 표를 다시 만들지 않는다 (끊긴 실행을 이어 돌릴 때)
+
+
+def _timed(con, sql):
+    started = time.perf_counter()
+    con.execute(sql)
+    return round(time.perf_counter() - started, 1)
+
+
+def _rows(con, table):
+    return con.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
+
+
+def _kind(con, name):
+    """그 이름이 표면 'BASE TABLE', 뷰면 'VIEW', 없으면 None."""
+    row = con.execute("SELECT table_type FROM information_schema.tables WHERE table_name = ? AND table_schema = 'main'", [name]).fetchone()
+    return row[0] if row else None
+
+
+def _reuse(con, *tables):
+    """REUSE 가 켜져 있고 표가 전부 이미 있으면 True."""
+    return REUSE and all(_kind(con, t) == 'BASE TABLE' for t in tables)
+
+
+def _view(con, name, sql):
+    """뷰를 만든다. 같은 이름의 표가 남아 있으면 먼저 지운다."""
+    if _kind(con, name) == 'BASE TABLE':
+        con.execute(f'DROP TABLE {name}')
+    con.execute(f'CREATE OR REPLACE VIEW {name} AS {sql}')
+
+
+def skipped(con):
+    """건너뛴 룰 표 이름들 (경로 수 상한이 max_walks 를 넘어 만들지 않은 cycle_* / random_*)."""
+    con.execute('CREATE TABLE IF NOT EXISTS rule_skipped (name VARCHAR)')
+    return {name for (name,) in con.execute('SELECT name FROM rule_skipped').fetchall()}
+
+
+def _between(window):
+    return f"BETWEEN DATE '{window[0]}' AND DATE '{window[1]}'"
+
+
+# ----------------------------------------------------------------------------- 거래 올리기
+def load_tx(con, base, start, end, units_per_usd, exclude=(), fx_ratio=(0.8, 1.25)):
+    """[start, end] 날짜의 거래를 DuckDB 표로 올린다.
+
+    tx_all : 읽은 거래 전부. 지표는 여기서 센다
+    tx     : 룰이 보는 거래. 자기 자신에게 보낸 거래를 뺀 것 (뷰)
+    exclude: 지표에서 빼는 세탁의 pattern_type 목록 (예: ['NO_PATTERN', 'STACK', 'BIPARTITE'])
+    fx_ratio: 환전 직후 송금으로 보는 금액 비(보낸 금액 ÷ 환전해 받은 금액)의 (최소, 최대)
+    열     : edge_id, ts, day, src, dst, usd, y, pattern_type, attempt_id, first_pair, fx_pair, skip
+             pattern_type 은 정상이면 '', 패턴 파일에 없는 세탁이면 'NO_PATTERN'
+             first_pair 는 그 (송금 계좌, 수취 계좌) 쌍의 첫 거래인가. 읽는 기간이 아니라 **데이터 처음부터 end 까지** 전체에서 본다
+             fx_pair 는 환전 직후 송금인가. 같은 계좌가 **같은 시각(분)** 에 자기 계좌 안에서 환전했고(src = dst, 보낸 통화 ≠ 받은 통화),
+                     그 환전으로 받은 통화가 이 거래의 보낸 통화와 같고, 보낸 금액 ÷ 환전해 받은 금액이 fx_ratio 안이다. 자기 자신에게 보낸 거래는 False
+             skip 은 지표에서 빼는 거래인가 (세탁이고 pattern_type 이 exclude 에 있다). 룰은 이 거래도 그대로 본다
+    """
+    excluded = ', '.join("'" + kind.replace("'", "''") + "'" for kind in exclude) or "'(없음)'"
+    rates = ', '.join("('" + currency.replace("'", "''") + f"', {units!r})" for currency, units in units_per_usd.items())
+    con.execute(f'CREATE OR REPLACE TEMP TABLE fx_rates AS SELECT * FROM (VALUES {rates}) AS r(currency, units)')
+    source = f"read_parquet('{base / 'transactions.parquet'}')"
+    con.execute(f"""
+        CREATE OR REPLACE TABLE tx_all AS
+        WITH pat AS (SELECT edge_id, min(attempt_id) AS attempt_id, arg_min(pattern_type, attempt_id) AS pattern_type
+                     FROM read_parquet('{base / 'patterns.parquet'}') WHERE edge_id IS NOT NULL GROUP BY edge_id),
+        pair AS (SELECT arg_min(edge_id, (ts, edge_id)) AS edge_id FROM {source}        -- 그 쌍에서 시각이 가장 이른 거래 (같으면 edge_id 가 작은 쪽)
+                 WHERE day <= DATE '{end}' AND src <> dst GROUP BY src, dst),
+        swap AS (SELECT DISTINCT src AS a, ts, receiving_currency AS currency, received AS amount FROM {source}      -- 자기 계좌 안 환전
+                 WHERE day BETWEEN DATE '{start}' AND DATE '{end}' AND src = dst AND payment_currency <> receiving_currency AND received > 0),
+        fx AS (SELECT DISTINCT t.edge_id FROM {source} t JOIN swap s                                                -- 그 환전과 같은 시각 · 같은 통화 · 비슷한 금액으로 남에게 보낸 거래
+                 ON s.a = t.src AND s.ts = t.ts AND s.currency = t.payment_currency
+                AND t.paid BETWEEN s.amount * {fx_ratio[0]} AND s.amount * {fx_ratio[1]}
+               WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}' AND t.src <> t.dst)
+        SELECT t.edge_id, t.ts, t.day, t.src, t.dst, round(t.paid / f.units, 6) AS usd,
+               CAST(t.is_laundering AS TINYINT) AS y,
+               CASE WHEN t.is_laundering THEN coalesce(p.pattern_type, 'NO_PATTERN') ELSE '' END AS pattern_type,
+               CASE WHEN t.is_laundering THEN p.attempt_id END AS attempt_id,
+               pair.edge_id IS NOT NULL AS first_pair,
+               fx.edge_id IS NOT NULL AS fx_pair,
+               t.is_laundering AND coalesce(p.pattern_type, 'NO_PATTERN') IN ({excluded}) AS skip
+        FROM {source} t
+        LEFT JOIN fx_rates f ON f.currency = t.payment_currency
+        LEFT JOIN pat p USING (edge_id)
+        LEFT JOIN pair USING (edge_id)
+        LEFT JOIN fx USING (edge_id)
+        WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}'""")
+    _view(con, 'tx', 'SELECT * FROM tx_all WHERE src <> dst')
+    n, first, last, unknown, skip, fx = con.execute(
+        '''SELECT count(*), min(ts), max(ts), count(*) FILTER (WHERE usd IS NULL), count(*) FILTER (WHERE skip),
+                  count(*) FILTER (WHERE fx_pair) FROM tx_all''').fetchone()
+    return dict(읽은_거래=n, 룰이_보는_거래=_rows(con, 'tx'), 시작=str(first), 끝=str(last), 환율_모르는_거래=unknown, 지표에서_뺀_세탁=skip,
+                환전_직후_송금=fx)
+
+
+def busy_accounts(con, busy_max, busy_minutes):
+    """바쁜 계좌: 어느 busy_minutes 구간에서든 보낸 거래 또는 받은 거래가 busy_max 건을 넘는 계좌.
+    거래 필터를 걸기 전의 거래(tx)로 센다. busy_max 가 None 이면 바쁜 계좌를 두지 않는다."""
+    if busy_max is None:
+        con.execute('CREATE OR REPLACE TABLE busy AS SELECT src AS a FROM tx WHERE false')
+    else:
+        frame = f'RANGE BETWEEN INTERVAL {busy_minutes - 1} MINUTES PRECEDING AND CURRENT ROW'
+        con.execute(f"""
+            CREATE OR REPLACE TABLE busy AS
+            SELECT DISTINCT a FROM (
+                SELECT src AS a, count(*) OVER (PARTITION BY src ORDER BY ts {frame}) AS n FROM tx
+                UNION ALL
+                SELECT dst, count(*) OVER (PARTITION BY dst ORDER BY ts {frame}) FROM tx)
+            WHERE n > {busy_max}""")
+    touched, laundering = con.execute("""SELECT count(*), coalesce(sum(y), 0) FROM tx
+                                         WHERE src IN (SELECT a FROM busy) OR dst IN (SELECT a FROM busy)""").fetchone()
+    return dict(바쁜_계좌=_rows(con, 'busy'), 바쁜_계좌에_닿은_거래=touched, 그중_세탁=int(laundering))
+
+
+FX_MODES = {None: '', 'and': 'x', 'or': 'o'}      # 환전 조건을 쓰는 방식 → 필터 꼬리표에 붙는 글자
+
+
+def filter_tag(min_usd, first_only, fx=None):
+    """필터 설정 → 표 이름에 붙는 꼬리표. 예: (1000, True) → m1000f, (1000, True, 'and') → m1000fx, (0, True, 'or') → m0fo"""
+    return f"m{min_usd}{'f' if first_only else 'a'}{FX_MODES[fx]}"
+
+
+def apply_filter(con, tag, min_usd, first_only, fx=None):
+    """거래 필터 하나를 건다. 룰은 이 필터를 통과한 거래만 세고, 근거 거래도 그 안에서만 나온다.
+
+    min_usd    : 건당 최소 금액(USD). 이보다 작은 거래는 세지 않는다
+    first_only : True 면 그 (송금 계좌, 수취 계좌) 쌍의 첫 거래만 센다 = 처음 거래하는 상대
+    fx         : 환전 직후 송금(열 fx_pair) 조건을 쓰는 방식
+                 None  = 쓰지 않는다
+                 'and' = 다른 조건에 AND 로 붙인다. 환전 직후 송금만 센다
+                 'or'  = '처음 거래하는 상대' 와 OR 로 묶는다. 첫 거래이거나 환전 직후 송금이면 센다 (first_only = True 일 때만 쓴다)
+                 건당 최소 금액은 어느 방식에서든 AND 다
+    만드는 것  : tx_<tag> (필터를 통과한 거래, 뷰), txn_<tag> (그중 양쪽 어디에도 바쁜 계좌가 없는 거래, 표)
+    """
+    assert fx in FX_MODES, f'fx 는 {list(FX_MODES)} 중 하나'
+    assert fx != 'or' or first_only, "fx='or' 는 '처음 거래하는 상대' 와 묶는 것이라 first_only = True 여야 한다"
+    conditions = [f'usd >= {min_usd}']
+    if fx == 'or':
+        conditions.append('(first_pair OR fx_pair)')
+    else:
+        conditions += ['first_pair'] * bool(first_only) + ['fx_pair'] * (fx == 'and')
+    _view(con, f'tx_{tag}', f"SELECT * FROM tx WHERE {' AND '.join(conditions)}")
+    con.execute(f"""CREATE OR REPLACE TABLE txn_{tag} AS
+                    SELECT * FROM tx_{tag} WHERE src NOT IN (SELECT a FROM busy) AND dst NOT IN (SELECT a FROM busy)""")
+    n, laundering, patterned = con.execute(f"""SELECT count(*), coalesce(sum(y), 0),
+        count(*) FILTER (WHERE pattern_type IN ({', '.join(repr(v) for v in RULES.values())})) FROM tx_{tag}""").fetchone()
+    return dict(tag=tag, 건당_최소_USD=min_usd, 첫_거래만=first_only, 환전={None: '—', 'and': 'AND', 'or': 'OR'}[fx],
+                남은_거래=n, 그중_세탁=int(laundering), 그중_6종_패턴_세탁=patterned)
+
+
+# ----------------------------------------------------------------------------- ①② FAN-OUT · FAN-IN (집계형)
+def fan(con, side, W, tag):
+    """FAN-OUT(side='out') / FAN-IN(side='in').
+
+    대상 계좌 A 의 거래 하나하나가 트리거다. 트리거 시각에서 기간 W 만큼 돌아봐 서로 다른 상대 계좌 수 k 와 거래 수 n 을 센다.
+    k >= K 인 트리거의 기간 안에 든 A 의 같은 방향 거래 전부가 근거 거래다.
+      v      = 그 거래를 기간 안에 담는 트리거들의 k 중 최댓값
+      v_once = 같은 값인데 "반복 없음"(n = k: 기간 안에서 모든 상대와 한 번씩만 거래)인 트리거만 본 것
+    따라서 v >= K (또는 v_once >= K) 인 거래가 조건값 K 의 근거 거래다.
+    """
+    subject, other = ('src', 'dst') if side == 'out' else ('dst', 'src')
+    table = f'fan_{side}_{W}_{tag}'
+    if _reuse(con, table):
+        return dict(표=table, 거래=_rows(con, table), 초=0.0)
+    back = f'INTERVAL {W - 1} MINUTES'
+    seconds = _timed(con, f"""
+        CREATE OR REPLACE TABLE {table} AS
+        WITH trig AS (                                   -- 트리거마다: 기간 안 서로 다른 상대 계좌 수와 거래 수
+            SELECT edge_id, {subject} AS a, ts, count(DISTINCT {other}) OVER w AS k, count(*) OVER w AS n
+            FROM tx_{tag} WHERE {subject} NOT IN (SELECT a FROM busy)
+            WINDOW w AS (PARTITION BY {subject} ORDER BY ts RANGE BETWEEN {back} PRECEDING AND CURRENT ROW)
+        ), reach AS (                                    -- 거래마다: 자기를 담는 트리거들의 k 최댓값
+            SELECT edge_id, a AS subj, max(k) OVER fwd AS v, coalesce(max(CASE WHEN n = k THEN k END) OVER fwd, 0) AS v_once
+            FROM trig
+            WINDOW fwd AS (PARTITION BY a ORDER BY ts RANGE BETWEEN CURRENT ROW AND {back} FOLLOWING))
+        SELECT edge_id, v, v_once, subj FROM reach WHERE v >= 2""")
+    return dict(표=table, 거래=_rows(con, table), 초=seconds)
+
+
+# ----------------------------------------------------------------------------- ③ GATHER-SCATTER (집계형)
+def gather_scatter(con, W, tag):
+    """GATHER-SCATTER: 가운데 계좌 H 가 여러 계좌에서 받은 뒤 여러 계좌로 보낸다.
+
+    H 의 출금 하나하나가 트리거다. 트리거 시각 t0 에서 기간 W 만큼 돌아봐
+      din  = 기간 안 입금의 서로 다른 송금 계좌 수
+      dout = 기간 안 첫 입금 시각부터 t0 까지 출금의 서로 다른 수취 계좌 수   ("모은 뒤에 뿌린다")
+    를 세고, 트리거의 세기를 g = min(din, dout) 로 둔다. g >= K 면 적중이다.
+    근거 거래 = 기간 안 입금 전부 + 첫 입금 뒤의 출금.
+    거래별 세기 v = 그 거래를 근거로 삼는 트리거들의 g 중 최댓값.
+    """
+    table = f'gather_scatter_{W}_{tag}'
+    if _reuse(con, table):
+        return dict(표=table, 거래=_rows(con, table), 초=0.0)
+    back = f'INTERVAL {W - 1} MINUTES'
+    seconds = _timed(con, f"""
+        CREATE OR REPLACE TABLE {table} AS
+        WITH ev AS (                                     -- 계좌 쪽에서 본 거래. dir 0 = 받음, 1 = 보냄
+            SELECT edge_id, dst AS a, src AS cp, ts, 0 AS dir FROM tx_{tag} WHERE dst NOT IN (SELECT a FROM busy)
+            UNION ALL
+            SELECT edge_id, src, dst, ts, 1 FROM tx_{tag} WHERE src NOT IN (SELECT a FROM busy)
+        ), s1 AS (
+            SELECT *,
+                   count(DISTINCT CASE WHEN dir = 0 THEN cp END) OVER w AS din,
+                   min(CASE WHEN dir = 0 THEN ts END) OVER w AS first_in,
+                   max(CASE WHEN dir = 0 THEN ts END) OVER (PARTITION BY a ORDER BY ts
+                         RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS last_in      -- 이 시각까지의 마지막 입금
+            FROM ev
+            WINDOW w AS (PARTITION BY a ORDER BY ts RANGE BETWEEN {back} PRECEDING AND CURRENT ROW)
+        ), s2 AS (                                       -- 출금 트리거의 세기 g
+            SELECT *,
+                   CASE WHEN dir = 1 AND first_in IS NOT NULL THEN least(din,
+                        count(DISTINCT CASE WHEN dir = 1 THEN cp END) OVER (PARTITION BY a ORDER BY ts
+                              RANGE BETWEEN coalesce(ts - first_in, INTERVAL 0 MINUTES) PRECEDING AND CURRENT ROW)) END AS g
+            FROM s1
+        ), s3 AS (                                       -- 거래마다: 자기를 근거로 삼는 트리거들의 g 최댓값
+            SELECT edge_id, a AS subj,
+                   CASE WHEN dir = 0 THEN                -- 입금: 뒤로 W 안의 모든 출금 트리거
+                        max(g) OVER (PARTITION BY a ORDER BY ts RANGE BETWEEN CURRENT ROW AND {back} FOLLOWING)
+                        WHEN last_in IS NOT NULL THEN    -- 출금: 직전 입금이 아직 기간 안에 있는 트리거까지만
+                        max(g) OVER (PARTITION BY a ORDER BY ts RANGE BETWEEN CURRENT ROW
+                              AND greatest(last_in + {back} - ts, INTERVAL 0 MINUTES) FOLLOWING) END AS v
+            FROM s2)
+        SELECT edge_id, max(v) AS v, arg_max(subj, (v, -subj)) AS subj       -- 세기가 같으면 번호가 작은 계좌
+        FROM s3 WHERE v >= 1 GROUP BY edge_id""")
+    return dict(표=table, 거래=_rows(con, table), 초=seconds)
+
+
+# ----------------------------------------------------------------------------- ④ SCATTER-GATHER (2홉형)
+def sg_candidates(con, tag):
+    """SCATTER-GATHER 의 후보를 거래 시각과 무관하게 먼저 추린다. 필터마다 apply_filter() 뒤에 한 번 부른다.
+
+    sg_cand_<tag> : 경유 계좌를 2개 이상 공유하는 (S, D) 와 그 경유 계좌 m.  S → m 거래와 m → D 거래가 둘 다 있다는 뜻이다
+    sg_leg_<tag>  : 후보의 2단계 거래(m → D)마다, 그 시각까지의 마지막 1단계 거래(S → m) 시각 t1
+    """
+    if _reuse(con, f'sg_cand_{tag}', f'sg_leg_{tag}'):
+        pairs = con.execute(f'SELECT count(*) FROM (SELECT DISTINCT s, d FROM sg_cand_{tag})').fetchone()[0]
+        return dict(tag=tag, 계좌_쌍=None, 후보_SD=pairs, 후보_2단계_거래=_rows(con, f'sg_leg_{tag}'), 초=0.0)
+    started = time.perf_counter()
+    con.execute(f'CREATE OR REPLACE TEMP TABLE sg_pairs AS SELECT DISTINCT src, dst FROM txn_{tag}')
+    # 경유 계좌를 2개 이상 공유하려면 S 는 보낸 상대가 2 이상, D 는 받은 상대가 2 이상이어야 한다. 먼저 걸러 두면 아래 조인이 작아진다
+    con.execute('CREATE OR REPLACE TEMP TABLE sg_p1 AS SELECT * FROM sg_pairs WHERE src IN (SELECT src FROM sg_pairs GROUP BY src HAVING count(*) >= 2)')
+    con.execute('CREATE OR REPLACE TEMP TABLE sg_p2 AS SELECT * FROM sg_pairs WHERE dst IN (SELECT dst FROM sg_pairs GROUP BY dst HAVING count(*) >= 2)')
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE sg_sd AS                        -- 경유 계좌를 2개 이상 공유하는 (S, D)
+        SELECT p1.src AS s, p2.dst AS d
+        FROM sg_p1 p1 JOIN sg_p2 p2 ON p2.src = p1.dst
+        WHERE p1.src <> p2.dst                                       -- S = D 는 순환이라 뺀다
+        GROUP BY 1, 2 HAVING count(*) >= 2""")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE sg_cand_{tag} AS
+        SELECT c.s, c.d, p1.dst AS m
+        FROM sg_sd c JOIN sg_p1 p1 ON p1.src = c.s JOIN sg_p2 p2 ON p2.src = p1.dst AND p2.dst = c.d""")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE sg_leg_{tag} AS
+        WITH leg2 AS (SELECT c.s, c.d, c.m, e.edge_id AS e2, e.ts AS t2
+                      FROM sg_cand_{tag} c JOIN txn_{tag} e ON e.src = c.m AND e.dst = c.d)
+        SELECT l.s, l.d, l.m, l.e2, l.t2, e.ts AS t1
+        FROM leg2 l ASOF JOIN txn_{tag} e ON e.src = l.s AND e.dst = l.m AND l.t2 >= e.ts""")
+    pairs = con.execute(f'SELECT count(*) FROM (SELECT DISTINCT s, d FROM sg_cand_{tag})').fetchone()[0]
+    return dict(tag=tag, 계좌_쌍=_rows(con, 'sg_pairs'), 후보_SD=pairs, 후보_2단계_거래=_rows(con, f'sg_leg_{tag}'),
+                초=round(time.perf_counter() - started, 1))
+
+
+def scatter_gather(con, W, tag):
+    """SCATTER-GATHER: 출발 계좌 S → 경유 계좌 여러 개 → 도착 계좌 D.
+
+    D 로 들어온 거래(경유 → D)가 트리거다. 트리거 시각 t0 에서 기간 W 만큼 돌아봐,
+    "S → 경유" 가 "경유 → D" 보다 먼저(같은 분 포함) 있고 둘 다 기간 안인 경유 계좌 수 k 를 (S, D) 마다 센다.
+    k >= M 이면 적중이고, 그 경유 계좌들의 S → 경유 거래와 경유 → D 거래가 근거 거래다.
+    거래별 세기 v = 그 거래를 근거로 삼는 트리거들의 k 중 최댓값.
+    """
+    table = f'scatter_gather_{W}_{tag}'
+    if _reuse(con, table):
+        return dict(표=table, 거래=_rows(con, table), 초=0.0)
+    started = time.perf_counter()
+    lower = f'INTERVAL {W - 1} MINUTES'
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE sg_span AS         -- 트리거 × 경유 계좌 (그 경유 계좌의 마지막 2단계 시각 t2max)
+        WITH trig AS (SELECT q.s, q.d, q.e2 AS trig, q.t2 AS t0, count(DISTINCT r.m) AS k
+                      FROM sg_leg_{tag} q JOIN sg_leg_{tag} r
+                        ON r.s = q.s AND r.d = q.d AND r.t2 <= q.t2 AND r.t1 >= q.t2 - {lower}
+                      GROUP BY ALL HAVING count(DISTINCT r.m) >= 2)
+        SELECT q.s, q.d, q.trig, q.t0, q.k, r.m, max(r.t2) AS t2max
+        FROM trig q JOIN sg_leg_{tag} r ON r.s = q.s AND r.d = q.d AND r.t2 <= q.t0 AND r.t1 >= q.t0 - {lower}
+        GROUP BY ALL""")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {table} AS
+        WITH ev AS (
+            SELECT r.e2 AS edge_id, p.k, p.d FROM sg_span p JOIN sg_leg_{tag} r          -- 2단계 근거: 경유 → D
+              ON r.s = p.s AND r.d = p.d AND r.m = p.m AND r.t2 <= p.t0 AND r.t1 >= p.t0 - {lower}
+            UNION ALL
+            SELECT e.edge_id, p.k, p.d FROM sg_span p JOIN txn_{tag} e                   -- 1단계 근거: S → 경유
+              ON e.src = p.s AND e.dst = p.m AND e.ts <= p.t2max AND e.ts >= p.t0 - {lower})
+        SELECT edge_id, max(k) AS v, arg_max(d, (k, -d)) AS subj FROM ev GROUP BY edge_id""")
+    return dict(표=table, 거래=_rows(con, table), 초=round(time.perf_counter() - started, 1))
+
+
+# ----------------------------------------------------------------------------- ⑤⑥ CYCLE · RANDOM (경로형)
+def links(con, W, tag, ratio_min, ratio_max):
+    """이어지는 거래 쌍: 앞 거래의 수취 계좌가 뒤 거래의 송금 계좌이고, 뒤 거래가 앞 거래 이후(같은 분 포함) W 안이며,
+    뒤 금액 ÷ 앞 금액(USD)이 [ratio_min, ratio_max] 안인 쌍. 경로는 이 쌍을 따라서만 이어진다."""
+    table = f'links_{W}_{tag}'
+    if _reuse(con, table):
+        return dict(표=table, 이어지는_쌍=_rows(con, table), 초=0.0)
+    seconds = _timed(con, f"""
+        CREATE OR REPLACE TABLE {table} AS
+        SELECT e1.edge_id AS a, e2.edge_id AS b
+        FROM txn_{tag} e1 JOIN txn_{tag} e2
+          ON e2.src = e1.dst AND e2.ts >= e1.ts AND e2.ts <= e1.ts + INTERVAL {W - 1} MINUTES
+         AND e2.usd BETWEEN e1.usd * {ratio_min} AND e1.usd * {ratio_max}""")
+    return dict(표=table, 이어지는_쌍=_rows(con, table), 초=seconds)
+
+
+def walk_counts(con, W, tag, max_hops):
+    """경로를 실제로 만들기 전에 길이(거래 수)별 경로 수의 상한을 센다. 같은 계좌 재방문과 전체 기간 제한은 무시한 수다.
+    합이 수천만을 넘으면 paths() 가 오래 걸리거나 메모리가 모자랄 수 있으니 금액 비 범위나 기간을 줄인다."""
+    pairs = con.execute(f'SELECT a, b FROM links_{W}_{tag}').df()
+    ids = np.unique(np.concatenate([pairs.a.to_numpy(), pairs.b.to_numpy()]))
+    a, b = np.searchsorted(ids, pairs.a.to_numpy()), np.searchsorted(ids, pairs.b.to_numpy())
+    del pairs
+    count, out = np.ones(len(ids)), {}
+    for hops in range(2, max_hops + 1):
+        count = np.bincount(a, weights=count[b], minlength=len(ids))     # 거래마다: 거기서 시작하는 길이 hops 경로 수
+        out[hops] = int(count.sum())
+    return out
+
+
+def paths(con, W, tag, max_hops, bound=None, max_walks=None):
+    """links 를 따라 경로를 전부 만든 뒤 CYCLE 과 RANDOM 의 거래별 세기를 낸다.
+
+    경로 규칙: 시간순(같은 분 포함), 첫 거래부터 마지막 거래까지 W 안, 같은 계좌를 두 번 지나지 않음,
+               출발 계좌로 돌아오면 거기서 끝(순환), 거래 수는 max_hops 까지.
+    CYCLE : 출발 계좌로 돌아온 경로의 거래.   v = 그 거래가 든 순환 중 가장 긴 것의 거래 수 (shortest 열에 가장 짧은 것)
+    RANDOM: 돌아오지 않은 경로의 거래.       v = 그 거래가 든 경로 중 가장 긴 것의 거래 수
+            순환의 앞부분도 닫히기 전까지는 돌아오지 않은 경로라서 RANDOM 에도 걸린다.
+    bound, max_walks: bound(walk_counts 의 합 = 경로 수 상한)가 max_walks 를 넘으면 경로를 만들지 않고 건너뛴다.
+                      건너뛴 (필터, 기간)은 sweep 에서 빠진다.
+    """
+    cycle, random = f'cycle_{W}_{tag}', f'random_{W}_{tag}'
+    before = skipped(con)
+    con.execute('DELETE FROM rule_skipped WHERE name IN (?, ?)', [cycle, random])
+    if bound is not None and max_walks is not None and bound > max_walks:
+        con.execute('INSERT INTO rule_skipped VALUES (?), (?)', [cycle, random])
+        return dict(순환=None, 돌아오지_않은_경로=None, 순환_거래=None, 경로_거래=None, 초=0.0, 건너뜀=True)
+    if _reuse(con, cycle, random) and cycle not in before:
+        return dict(순환=None, 돌아오지_않은_경로=None, 순환_거래=_rows(con, cycle), 경로_거래=_rows(con, random), 초=0.0, 건너뜀=False)
+    started = time.perf_counter()
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE walks AS
+        WITH RECURSIVE walk(origin, t_first, last_id, node, hops, accts, edges, closed) AS (
+            SELECT e.src, e.ts, e.edge_id, e.dst, 1, [e.src, e.dst], [e.edge_id], false
+            FROM txn_{tag} e WHERE e.edge_id IN (SELECT a FROM links_{W}_{tag})
+            UNION ALL
+            SELECT w.origin, w.t_first, n.edge_id, n.dst, w.hops + 1,
+                   list_append(w.accts, n.dst), list_append(w.edges, n.edge_id), n.dst = w.origin
+            FROM walk w JOIN links_{W}_{tag} l ON l.a = w.last_id JOIN txn_{tag} n ON n.edge_id = l.b
+            WHERE NOT w.closed AND w.hops < {max_hops}
+              AND n.ts <= w.t_first + INTERVAL {W - 1} MINUTES
+              AND (n.dst = w.origin OR NOT list_contains(w.accts, n.dst)))
+        SELECT origin, node, hops, edges, closed FROM walk WHERE hops >= 2""")
+    n_cycle, n_open = con.execute(
+        'SELECT count(*) FILTER (WHERE closed), count(*) FILTER (WHERE NOT closed) FROM walks').fetchone()
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {cycle} AS
+        SELECT edge_id, max(hops) AS v, arg_max(origin, (hops, -origin)) AS subj, min(hops) AS shortest
+        FROM (SELECT unnest(edges) AS edge_id, hops, origin FROM walks WHERE closed) GROUP BY edge_id""")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {random} AS
+        SELECT edge_id, max(hops) AS v, arg_max(node, (hops, -node)) AS subj
+        FROM (SELECT unnest(edges) AS edge_id, hops, node FROM walks WHERE NOT closed) GROUP BY edge_id""")
+    con.execute('DROP TABLE walks')
+    return dict(순환=n_cycle, 돌아오지_않은_경로=n_open, 순환_거래=_rows(con, cycle),
+                경로_거래=_rows(con, random), 초=round(time.perf_counter() - started, 1), 건너뜀=False)
+
+
+# ----------------------------------------------------------------------------- 조건을 바꿔 가며 재기
+def sweep(con, grid, windows, filters, spans):
+    """룰 × 필터 × 반복 × 기간 × 조건값 전부를 구간마다 잰다.
+
+    grid: {룰: [조건값, ...]}, filters: {필터 이름: tag}, spans: {구간 이름: (시작일, 끝일)}
+    지표에서 빼는 거래(skip)는 고른 거래에도 분모에도 넣지 않는다
+    정밀도    = 고른 거래 중 세탁(패턴 종류 무관) 비율
+    재현율    = 그 룰이 노리는 패턴의 세탁 거래 중 고른 비율
+    F1        = 위 둘의 조화평균. 조건을 고를 때 쓴다
+    대상_계좌 = 근거 거래가 걸린 서로 다른 대상 계좌 수
+    표가 없거나 건너뛴 (룰, 필터, 기간)은 결과에 없다
+    """
+    span = 'CASE ' + ' '.join(f"WHEN t.day {_between(w)} THEN '{name}'" for name, w in spans.items()) + ' END'
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE tx_eval AS                  -- 지표에 쓰는 거래만 (구간 안, skip 아님)
+                    SELECT t.edge_id, {span} AS span, t.y, t.pattern_type FROM tx_all t WHERE {span} IS NOT NULL AND NOT t.skip""")
+    own_total = {(s, kind): n for s, kind, n in con.execute('SELECT span, pattern_type, count(*) FROM tx_eval GROUP BY 1, 2').fetchall()}
+    rows, left_out = [], skipped(con)
+    for rule, label in RULES.items():
+        fan_rule = rule.startswith('fan_')
+        once = 'r.v_once' if fan_rule else 'r.v'
+        for name, tag in filters.items():
+            for W in windows:
+                table = f'{rule}_{W}_{tag}'
+                if table in left_out or _kind(con, table) != 'BASE TABLE':      # 건너뛰었거나 만들지 않은 (룰, 필터, 기간)
+                    continue
+                source = f'{table} r JOIN tx_eval t USING (edge_id)'
+                # 세기 값마다의 건수를 한 번에 세고, 조건값별 합은 pandas 에서 낸다
+                hist = con.execute(f"""SELECT t.span AS span, r.v AS v, {once} AS v_once, count(*) AS n, sum(t.y) AS laundering,
+                                              count(*) FILTER (WHERE t.pattern_type = '{label}') AS own
+                                       FROM {source} GROUP BY 1, 2, 3""").df()
+                subj = con.execute(f"""SELECT span, v, v_once, count(*) AS n FROM (
+                                           SELECT t.span AS span, r.subj, max(r.v) AS v, max({once}) AS v_once
+                                           FROM {source} GROUP BY 1, 2) GROUP BY 1, 2, 3""").df()
+                for s in spans:
+                    h, a = hist[hist.span == s], subj[subj.span == s]
+                    total = own_total.get((s, label), 0)
+                    for repeat, column in (REPEAT if fan_rule else {'—': 'v'}).items():
+                        for value in grid[rule]:
+                            part = h[h[column] >= value]
+                            picked, laundering, own = int(part.n.sum()), int(part.laundering.sum()), int(part.own.sum())
+                            precision, recall = laundering / max(picked, 1), own / max(total, 1)
+                            rows.append(dict(구간=s, 룰=label, 필터=name, 반복=repeat, 기간_분=W, 조건값=value,
+                                             대상_계좌=int(a.n[a[column] >= value].sum()), 고른_거래=picked, 세탁=laundering,
+                                             정밀도=round(precision, 4), 자기_패턴_거래=total, 자기_패턴_잡음=own, 재현율=round(recall, 4),
+                                             F1=round(2 * precision * recall / max(precision + recall, 1e-12), 4)))
+    return pd.DataFrame(rows)
+
+
+def top(table, rule, n=8, by='F1'):
+    """sweep 표에서 룰 하나의 상위 n 개 조건."""
+    part = table[table.룰 == RULES[rule]].sort_values([by, '고른_거래'], ascending=[False, True]).head(n)
+    return part.drop(columns=['구간', '룰', '자기_패턴_거래'], errors='ignore').reset_index(drop=True)
+
+
+def view(table, rule, name, repeat=None, columns=('대상_계좌', '고른_거래', '정밀도', '재현율')):
+    """sweep 표에서 룰 하나 · 필터 하나를 '조건값 × 기간' 모양으로 본다. FAN 은 repeat('허용' / '없음')도 고른다."""
+    part = table[(table.룰 == RULES[rule]) & (table.필터 == name)]
+    if repeat is not None:
+        part = part[part.반복 == repeat]
+    return pd.concat({W: g.set_index('조건값')[list(columns)] for W, g in part.groupby('기간_분')}, axis=1, names=['기간_분', None])
+
+
+def pick(table, by='F1'):
+    """룰마다 by 가 가장 큰 조건 한 벌을 고른다. 동점이면 고른 거래가 적은 쪽. sweep 표에 줄이 없는 룰은 빠진다.
+    돌려주는 것: {룰: dict(필터, 반복, 기간_분, 조건값)}"""
+    best = table.sort_values([by, '고른_거래'], ascending=[False, True]).groupby('룰', sort=False).head(1).set_index('룰')
+    return {rule: dict(필터=best.loc[label, '필터'], 반복=best.loc[label, '반복'],
+                       기간_분=int(best.loc[label, '기간_분']), 조건값=int(best.loc[label, '조건값']))
+            for rule, label in RULES.items() if label in best.index}      # 결과가 하나도 없는 룰은 뺀다
+
+
+def chosen_rows(table, chosen):
+    """sweep 표에서 고른 조건(chosen)의 줄만 룰 순서대로."""
+    if not chosen:
+        return table.iloc[0:0]
+    key = pd.DataFrame([dict(룰=RULES[rule], **condition) for rule, condition in chosen.items()])
+    return key.merge(table, on=KEYS, how='left')
+
+
+# ----------------------------------------------------------------------------- 고른 조건의 결과 모으기
+def collect(con, chosen, filters, start, end):
+    """[start, end] 날짜의 거래(tx_all)에, 고른 조건(chosen)에서 룰마다 걸렸는지(True / False)를 붙여 가져온다.
+    열 이름은 패턴 이름('FAN-OUT', ...)이다. 지표에서 빼는 거래도 들어 있다(열 skip). 지표는 day_mask 로 만든 구간 안에서만 센다.
+    fx_pair 는 환전 직후 송금인가(load_tx). 줄 순서는 chosen 과 무관하게 같다(시각, edge_id 순)."""
+    selects, joins = [], []
+    for rule, c in chosen.items():
+        column = REPEAT.get(c['반복'], 'v')
+        selects.append(f"coalesce({rule}.{column} >= {c['조건값']}, false) AS \"{RULES[rule]}\"")
+        joins.append(f"LEFT JOIN {rule}_{c['기간_분']}_{filters[c['필터']]} AS {rule} USING (edge_id)")
+    return con.execute(f"""
+        SELECT {', '.join(['t.edge_id', 't.day', 't.y', 't.pattern_type', 't.attempt_id', 't.skip', 't.fx_pair', *selects])}
+        FROM tx_all t {' '.join(joins)}
+        WHERE t.day BETWEEN DATE '{start}' AND DATE '{end}'
+        ORDER BY t.ts, t.edge_id""").df()
+
+
+def _components(n, a, b):
+    """0..n-1 의 점을 (a[i], b[i]) 로 이은 뒤 점마다 덩어리 번호(그 덩어리에서 가장 작은 점 번호)를 돌려준다."""
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for x, y in zip(a, b):
+        rx, ry = find(int(x)), find(int(y))
+        if rx != ry:
+            parent[max(rx, ry)] = min(rx, ry)
+    return np.array([find(i) for i in range(n)], dtype=np.int64)
+
+
+def hit_groups(con, chosen, filters, start, end):
+    """고른 조건(chosen)에서 룰이 고른 거래를 "적중 묶음"으로 나눠 가져온다. [start, end] 날짜의 거래만 쓴다.
+
+    적중 묶음 = 한 룰이 같은 대상 때문에 고른 거래들. 룰만으로 Alert 를 만들 때 Alert 하나의 재료다.
+      FAN-OUT · FAN-IN · GATHER-SCATTER : 대상 계좌(뿌리는 / 모으는 / 가운데 계좌)가 같은 근거 거래
+      SCATTER-GATHER                   : 도착 계좌가 같은 근거 거래
+          → 이 넷은 대상이 같아도, 시각순으로 이웃한 두 근거 거래의 간격이 그 룰의 기간을 넘으면 거기서 나눈다
+      CYCLE · RANDOM                   : 근거 거래끼리 "이어지는 쌍"(links)으로 연결된 덩어리.
+                                          경로가 가지를 치거나 다른 경로와 거래를 공유하면 한 덩어리가 된다
+    한 거래가 대상 둘의 근거일 때(GATHER-SCATTER · SCATTER-GATHER)는 세기가 큰 쪽의 묶음에 든다(룰 표가 그렇게 저장한다).
+    따라서 한 룰 안에서는 거래 하나가 묶음 하나에만 든다. 룰이 다르면 같은 거래가 여러 묶음에 들 수 있다.
+
+    반환: DataFrame[edge_id, 룰, 대상, 묶음]
+          룰 = 패턴 이름, 묶음 = 그 룰 안에서 0 부터 매긴 번호,
+          대상 = 대상 계좌 (경로형은 덩어리에서 가장 이른 거래의 송금 계좌)
+    """
+    frames = []
+    for rule, c in chosen.items():
+        W, tag, column = c['기간_분'], filters[c['필터']], REPEAT.get(c['반복'], 'v')
+        ev = con.execute(f"""
+            SELECT r.edge_id, r.subj, t.ts, t.src
+            FROM {rule}_{W}_{tag} r JOIN tx_all t USING (edge_id)
+            WHERE r.{column} >= {c['조건값']} AND t.day BETWEEN DATE '{start}' AND DATE '{end}'
+            ORDER BY r.subj, t.ts, r.edge_id""").df()
+        if ev.empty:
+            continue
+        if rule in ('cycle', 'random'):
+            con.register('hit_ev', ev[['edge_id']])
+            pairs = con.execute(f"""SELECT l.a, l.b FROM links_{W}_{tag} l
+                                    WHERE l.a IN (SELECT edge_id FROM hit_ev) AND l.b IN (SELECT edge_id FROM hit_ev)""").df()
+            con.unregister('hit_ev')
+            ev = ev.sort_values(['ts', 'edge_id']).reset_index(drop=True)
+            row = pd.Series(ev.index, index=ev.edge_id)
+            root = _components(len(ev), row.loc[pairs.a].to_numpy(), row.loc[pairs.b].to_numpy())
+            ev['대상'] = ev.src.to_numpy()[root]          # 덩어리의 첫 거래(시각순 가장 앞)의 송금 계좌
+            ev['묶음'] = pd.factorize(root)[0]
+        else:
+            gap = ev.ts.diff() > pd.Timedelta(minutes=W)
+            ev['대상'] = ev.subj
+            ev['묶음'] = ((ev.subj != ev.subj.shift()) | gap).cumsum() - 1
+        frames.append(ev.assign(룰=RULES[rule])[['edge_id', '룰', '대상', '묶음']])
+    if not frames:
+        return pd.DataFrame(dict(edge_id=pd.Series(dtype='int64'), 룰=pd.Series(dtype='object'),
+                                 대상=pd.Series(dtype='int64'), 묶음=pd.Series(dtype='int64')))
+    return pd.concat(frames, ignore_index=True).astype({'대상': 'int64', '묶음': 'int64'})
+
+
+def merge_groups(groups):
+    """적중 묶음끼리 거래를 하나라도 공유하면 합친다. groups: DataFrame[edge_id, 룰, 묶음].
+    행마다 합친 뒤의 묶음 번호(0 부터)를 돌려준다. 공유가 사슬처럼 이어지면 전부 한 묶음이 된다(A-B 공유, B-C 공유 → A·B·C)."""
+    hit = pd.factorize(pd.MultiIndex.from_frame(groups[['룰', '묶음']]))[0]      # 적중 묶음 번호
+    order = np.argsort(groups.edge_id.to_numpy(), kind='stable')
+    edge, h = groups.edge_id.to_numpy()[order], hit[order]
+    same = edge[1:] == edge[:-1]                                                # 같은 거래가 든 두 묶음
+    root = _components(int(hit.max()) + 1 if len(hit) else 0, h[:-1][same], h[1:][same])
+    return pd.factorize(root[hit])[0]
+
+
+def expand_groups(groups, ledger):
+    """적중 묶음을 "대상 계좌의 주변 거래"로 넓힌다. 룰이 대상을 찾은 뒤에는 필터(금액 · 첫거래 · 환전)와 무관하게 그 대상의 거래를 Alert 에 넣는다는 뜻이다.
+
+    groups : DataFrame[edge_id, 룰, 대상, 묶음, ts, src, dst]. 근거 거래 (hit_groups 에 시각과 계좌를 붙인 것)
+    ledger : DataFrame[edge_id, ts, src, dst]. 넓힐 때 볼 거래. 자기 자신에게 보낸 거래는 빼고 준다
+    기간   : 묶음마다 첫 근거 거래 시각 ~ 마지막 근거 거래 시각 (양 끝 포함). 그 밖의 거래는 넣지 않는다
+    넣는 거래
+      FAN-OUT        : 대상 계좌가 보낸 거래
+      FAN-IN         : 대상 계좌가 받은 거래
+      GATHER-SCATTER : 대상(가운데) 계좌가 받은 거래와 보낸 거래
+      SCATTER-GATHER : 경유 계좌 → 도착 계좌 거래, 출발 계좌 → 경유 계좌 거래. 경유 · 출발 계좌는 그 묶음의 근거 거래에서 읽는다
+      CYCLE · RANDOM : 넓히지 않는다 (경로에는 "대상 계좌의 거래" 라고 할 것이 없다)
+    반환   : DataFrame[edge_id, 룰, 대상, 묶음, 근거]. 근거 = 원래 근거 거래인가. 한 룰 안에서도 같은 거래가 여러 묶음에 들 수 있다
+    """
+    key = ['룰', '묶음']
+    span = groups.groupby(key).agg(대상=('대상', 'first'), t0=('ts', 'min'), t1=('ts', 'max')).reset_index()
+
+    def within(frame):
+        return frame.loc[(frame.ts >= frame.t0) & (frame.ts <= frame.t1), ['edge_id', *key, '대상']]
+
+    ledger = ledger[['edge_id', 'ts', 'src', 'dst']]
+    parts = [groups[['edge_id', *key, '대상']]]
+    parts.append(within(ledger.merge(span[span.룰.isin(['FAN-OUT', 'GATHER-SCATTER'])], left_on='src', right_on='대상')))
+    parts.append(within(ledger.merge(span[span.룰.isin(['FAN-IN', 'GATHER-SCATTER'])], left_on='dst', right_on='대상')))
+    sg = groups[groups.룰 == 'SCATTER-GATHER']
+    mids = sg.loc[sg.dst == sg.대상, [*key, 'src']].drop_duplicates().rename(columns={'src': 'mid'})          # 묶음의 경유 계좌
+    origins = (sg.merge(mids, left_on=[*key, 'dst'], right_on=[*key, 'mid'])[[*key, 'src', 'mid']]
+               .drop_duplicates().rename(columns={'src': 'origin'}))                                         # (출발 계좌, 경유 계좌)
+    sg_span = span[span.룰 == 'SCATTER-GATHER']
+    parts.append(within(ledger.merge(mids.merge(sg_span, on=key), left_on=['src', 'dst'], right_on=['mid', '대상'])))
+    parts.append(within(ledger.merge(origins.merge(sg_span, on=key), left_on=['src', 'dst'], right_on=['origin', 'mid'])))
+    wide = pd.concat(parts, ignore_index=True).drop_duplicates(['edge_id', *key]).reset_index(drop=True)
+    wide['근거'] = pd.MultiIndex.from_frame(wide[['edge_id', *key]]).isin(pd.MultiIndex.from_frame(groups[['edge_id', *key]]))
+    return wide
+
+
+def compare_alerts(name, groups, attempt_of, eval_attempts, truth):
+    """묶음(Alert)을 정답 시도와 비교한다. gen_lib.compare_to_truth 와 같은 항목을 내되, **한 거래가 여러 묶음에 들어도** 된다.
+    겹침이 없는 입력에서는 compare_to_truth 와 값이 같다.
+
+    groups       : DataFrame[edge_id, group, y]. 묶음에 들어간 거래(묶음 크기 2 이상). 같은 거래가 여러 줄에 있을 수 있다
+    attempt_of   : DataFrame[edge_id, attempt_id, pattern_type]. 패턴 세탁 거래 전부
+    eval_attempts: 평가할 시도 번호들 (쓰지 않지만 compare_to_truth 와 인자를 맞춘다)
+    truth        : 정답 거래 DataFrame[edge_id, attempt_id, pattern_type]
+    겹칠 때의 뜻 : 묶인_거래 · 세탁_비율 은 거래를 한 번만 센다. 쌍_정밀도는 묶음마다 센다.
+                   쌍_재현율은 같은 시도의 두 거래가 **어느 한 묶음에라도** 같이 있으면 맞은 것으로 센다.
+                   쪼개진_시도는 시도의 거래가 묶음 2개 이상에 들어 있는 수다(같은 거래가 두 묶음에 든 경우도 포함).
+    돌려주는 것  : (요약 dict, 시도별 DataFrame)
+    """
+    pairs = lambda n: n * (n - 1) // 2
+    g = groups.merge(attempt_of[['edge_id', 'attempt_id']], on='edge_id', how='left')
+    size = g.groupby('group').size()
+    cell = g.dropna(subset=['attempt_id']).groupby(['group', 'attempt_id']).size()
+    attempts_in = cell.groupby('group').size().reindex(size.index, fill_value=0)
+    laundering = g.groupby('group')['y'].sum()
+    once = groups.drop_duplicates('edge_id')
+    same_pairs = int(sum(pairs(int(v)) for v in cell.to_numpy()))
+    all_pairs = int(sum(pairs(int(v)) for v in size.to_numpy()))
+    t = truth[['edge_id', 'attempt_id', 'pattern_type']].merge(groups[['edge_id', 'group']], on='edge_id', how='left')
+    rows = []
+    for attempt, part in t.groupby('attempt_id'):
+        inside = part.dropna(subset=['group'])
+        counts = inside['group'].value_counts()
+        together = set()                                   # 어느 한 묶음에 같이 든 (거래, 거래) 쌍
+        for _, edges in inside.groupby('group')['edge_id']:
+            e = sorted(edges)
+            together.update((e[i], e[j]) for i in range(len(e)) for j in range(i + 1, len(e)))
+        rows.append(dict(attempt_id=attempt, pattern_type=part['pattern_type'].iloc[0], size=part['edge_id'].nunique(),
+                         covered=inside['edge_id'].nunique(), best=int(counts.iloc[0]) if len(counts) else 0,
+                         n_groups=len(counts), same_pairs=len(together)))
+    per = pd.DataFrame(rows)
+    per['coverage'] = per['best'] / per['size']
+    summary = dict(
+        방법=name, 묶음_수=len(size), 묶인_거래=len(once), 여러_묶음에_든_거래=int(len(groups) - len(once)),
+        크기_중앙값=float(size.median()), 크기_최대=int(size.max()),
+        세탁_비율=round(float(once['y'].sum() / len(once)), 4),
+        전부_정상_묶음=int((laundering == 0).sum()),
+        시도_2개이상_섞인_묶음=int((attempts_in >= 2).sum()),
+        쌍_정밀도=round(same_pairs / max(all_pairs, 1), 4),
+        쌍_재현율=round(per['same_pairs'].sum() / max(int(sum(pairs(int(v)) for v in per['size'])), 1), 4),
+        시도_수=len(per), 온전히_한_묶음=int((per['best'] == per['size']).sum()),
+        온전_비율=round(float((per['best'] == per['size']).mean()), 4),
+        평균_최대_포함률=round(float(per['coverage'].mean()), 4),
+        쪼개진_시도=int((per['n_groups'] >= 2).sum()), 전혀_안_묶인_시도=int((per['covered'] == 0).sum()))
+    return summary, per
+
+
+def day_mask(frame, window):
+    """window 날짜 안이고 지표에서 빼지 않는 거래. 지표 함수들은 이 구간 안에서만 센다."""
+    day = pd.to_datetime(frame.day)
+    return ((day >= pd.Timestamp(window[0])) & (day <= pd.Timestamp(window[1])) & ~frame.skip.astype(bool)).to_numpy()
+
+
+def method_metrics(name, chosen, frame, window):
+    """고른 거래 집합(chosen: bool 배열) 하나의 결과. window 는 day_mask 로 만든 구간이다.
+
+    재현율 = 구간 안 세탁 거래 중 고른 비율. 지표에서 빼는 거래는 구간에 없다.
+    구간에 무패턴 세탁이나 룰이 없는 패턴이 남아 있으면 분모를 좁힌 재현율 열을 더 낸다.
+    """
+    y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
+    chosen = chosen & window
+    positive = window & (y == 1)
+    patterned = positive & (kind != 'NO_PATTERN')
+    targeted = positive & np.isin(kind, list(RULES.values()))
+    tp = int((chosen & positive).sum())
+    row = dict(방법=name, 고른_거래=int(chosen.sum()), 세탁=tp, 정상=int(chosen.sum()) - tp,
+               정밀도=round(tp / max(int(chosen.sum()), 1), 4),
+               재현율=round(tp / max(int(positive.sum()), 1), 4))
+    if patterned.sum() != positive.sum():
+        row['재현율_패턴_전체'] = round(int((chosen & patterned).sum()) / max(int(patterned.sum()), 1), 4)
+    if targeted.sum() != positive.sum():
+        row['재현율_룰이_있는_6종'] = round(int((chosen & targeted).sum()) / max(int(targeted.sum()), 1), 4)
+    return row
+
+
+def rule_metrics(frame, window, hits):
+    """룰별 결과. hits: {패턴 이름: bool 배열} (그 룰이 고른 거래). sweep 과 같은 정의다.
+    정밀도 = 고른 거래 중 세탁(패턴 종류 무관) 비율, 재현율 = 그 룰이 노리는 패턴의 세탁 거래 중 고른 비율
+    패턴_세탁 = 구간 안 그 패턴의 세탁 거래 수(재현율의 분모), 패턴_고름 = 그중 고른 수"""
+    y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
+    rows = []
+    for label, mask in hits.items():
+        chosen = mask & window
+        picked, laundering = int(chosen.sum()), int((chosen & (y == 1)).sum())
+        own_total = int((window & (kind == label)).sum())
+        own = int((chosen & (kind == label)).sum())
+        precision, recall = laundering / max(picked, 1), own / max(own_total, 1)
+        rows.append(dict(룰=label, 고른_거래=picked, 세탁=laundering, 정밀도=round(precision, 4),
+                         패턴_세탁=own_total, 패턴_고름=own, 재현율=round(recall, 4),
+                         F1=round(2 * precision * recall / max(precision + recall, 1e-12), 4)))
+    return pd.DataFrame(rows)
+
+
+def by_pattern(frame, window, methods):
+    """패턴별 재현율. methods: {이름: bool 배열}"""
+    y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
+    rows = []
+    for name in sorted(set(kind[window & (y == 1)])):
+        base = window & (y == 1) & (kind == name)
+        row = dict(패턴=name, 세탁_거래=int(base.sum()))
+        row.update({label: round(int((base & mask).sum()) / int(base.sum()), 4) for label, mask in methods.items()})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def by_tail(frame, window, methods, after, labels):
+    """패턴 × 시도의 끝(구간 안에 끝남 / 구간 뒤로 이어짐) 별 재현율.
+
+    after : 거래마다 그 거래의 시도가 평가 구간 뒤로 이어지는가 (bool 배열. gen_lib.attempt_tail 로 만든다)
+    labels: {False: 이름, True: 이름} (gen_lib.TAIL_LABELS)
+    값    : 그 칸의 세탁 거래 중 그 방법이 고른 비율
+    """
+    y, kind = frame.y.to_numpy(), frame.pattern_type.to_numpy()
+    positive = window & (y == 1) & frame.attempt_id.notna().to_numpy()
+    rows = []
+    for name in [*sorted(set(kind[positive])), '(패턴 전체)']:
+        for flag, label in labels.items():
+            base = positive & (after == flag) & ((kind == name) | (name == '(패턴 전체)'))
+            if base.sum():
+                rows.append(dict(패턴=name, 끝=label, 시도=int(frame.attempt_id[base].nunique()), 세탁_거래=int(base.sum()),
+                                 **{method: round(int((mask & base).sum()) / int(base.sum()), 4) for method, mask in methods.items()}))
+    return pd.DataFrame(rows)
+
+
+def by_attempt(frame, window, methods, exclude=()):
+    """세탁 시도 단위. 시도마다 window 안 거래 중 고른 수를 세고, 패턴별로 1건 이상 / 절반 이상 / 전부 잡은 시도의 비율을 낸다."""
+    keep = np.flatnonzero(window & frame.attempt_id.notna().to_numpy() & ~frame.pattern_type.isin(list(exclude)).to_numpy())
+    inside = frame.iloc[keep][['pattern_type', 'attempt_id']]
+    rows = []
+    for label, mask in methods.items():
+        per = inside.assign(hit=mask[keep]).groupby(['pattern_type', 'attempt_id']).agg(size=('hit', 'size'), hit=('hit', 'sum')).reset_index()
+        for kind, g in per.groupby('pattern_type'):
+            rows.append(dict(패턴=kind, 방법=label, 시도=len(g), 한_건_이상=round(float((g.hit >= 1).mean()), 3),
+                             절반_이상=round(float((g.hit * 2 >= g['size']).mean()), 3), 전부=round(float((g.hit == g['size']).mean()), 3)))
+    return pd.DataFrame(rows).sort_values(['패턴', '방법'], kind='stable').reset_index(drop=True)

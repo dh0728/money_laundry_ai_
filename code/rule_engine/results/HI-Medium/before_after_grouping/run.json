@@ -1,0 +1,28 @@
+{
+  "dataset": "HI-Medium",
+  "scores": "../../parquets/HI-Medium/service_scores/multi280_hgb36_v1_test_scores.parquet",
+  "threshold": 0.194997844,
+  "seed_low": 0.1,
+  "chain_floor": 0.01,
+  "pad_days": 14,
+  "test_window": [
+    "2022-09-08",
+    "2022-09-16"
+  ],
+  "generator_commit": "ce5b429 2026-11-19 Merge pull request #227 from dh0728/backend",
+  "info": {
+    "policy": "block-pin-3",
+    "index_seconds": 66.1,
+    "build_seconds": 6.8,
+    "edge_visits": 1360537,
+    "graphs": 2051,
+    "unassigned": 3344
+  },
+  "alert_summary": {
+    "Alert_수": 2051,
+    "세탁_1건_이상": 2007,
+    "세탁_절반_이상": 1998,
+    "전부_세탁": 1739,
+    "전부_정상": 44
+  }
+}

@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>묶음 비교 · 정답 / 생성기 / 단순 연결</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f4f3ef; --surface: #fcfcfb; --text: #0b0b0b; --text2: #52514e; --muted: #7d7c75;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --wash: rgba(11,11,11,0.05); --sel: rgba(11,11,11,0.09);
+  --normal: #2a78d6; --laundering: #e34948;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #121211; --surface: #1a1a19; --text: #f0efec; --text2: #c3c2b7; --muted: #8f8e86;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --wash: rgba(255,255,255,0.06); --sel: rgba(255,255,255,0.12);
+    --normal: #3987e5; --laundering: #e66767;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; }
+.wrap { max-width: 1900px; margin: 0 auto; padding: 18px 18px 40px; }
+h1 { font-size: 20px; margin: 0 0 2px; font-weight: 650; }
+.sub { color: var(--text2); font-size: 13px; margin-bottom: 12px; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: end; padding: 12px 14px; margin-bottom: 12px; }
+.controls label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text2); }
+select, input[type="search"] { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 5px 8px; min-width: 120px; }
+.seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; color: var(--text2); background: var(--surface); border: 0; border-right: 1px solid var(--axis); padding: 5px 10px; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--sel); color: var(--text); font-weight: 600; }
+.main { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; align-items: start; }
+.list { max-height: 88vh; overflow-y: auto; position: sticky; top: 8px; }
+.listhead { position: sticky; top: 0; background: var(--surface); padding: 9px 12px; font-size: 12px; color: var(--text2); border-bottom: 1px solid var(--grid); border-radius: 10px 10px 0 0; z-index: 1; }
+.item { padding: 8px 12px; border-bottom: 1px solid var(--grid); cursor: pointer; }
+.item:hover { background: var(--wash); }
+.item.sel { background: var(--sel); }
+.item .l1 { display: flex; justify-content: space-between; gap: 8px; }
+.item .id { font-weight: 600; }
+.item .ty { color: var(--text2); font-size: 12px; }
+.item .l2 { font-size: 12px; color: var(--text2); display: flex; justify-content: space-between; gap: 8px; margin-top: 1px; font-variant-numeric: tabular-nums; }
+.empty { padding: 28px 14px; color: var(--muted); text-align: center; }
+.detail { padding: 14px; min-height: 300px; min-width: 0; }
+.dhead { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; align-items: baseline; }
+.dhead h2 { font-size: 17px; margin: 0; font-weight: 650; }
+.dhead .desc { color: var(--text2); font-size: 13px; }
+.viewbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 10px; }
+.viewbar .seg button { padding: 4px 10px; font-size: 12.5px; }
+.viewbar .hint { font-size: 12px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--text2); margin: 8px 0 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg { flex: none; }
+.panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: start; }
+.panels.stack { grid-template-columns: minmax(0, 1fr); }
+.panel { border: 1px solid var(--grid); border-radius: 8px; padding: 10px 10px 8px; min-width: 0; }
+.panel h3 { font-size: 14px; margin: 0; font-weight: 650; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.verdict { font-weight: 500; font-size: 12px; padding: 0 7px; border: 1px solid var(--axis); border-radius: 10px; }
+.facts { color: var(--text2); font-size: 12.5px; margin: 4px 0 6px; min-height: 2.9em; }
+.facts b { color: var(--text); font-weight: 600; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; min-height: 26px; }
+.chip { font: inherit; font-size: 12px; border: 1px solid var(--axis); background: none; border-radius: 6px; padding: 1px 7px; cursor: pointer; color: var(--text2); font-variant-numeric: tabular-nums; }
+.chip:hover, .chip.on { background: var(--sel); color: var(--text); border-color: var(--text2); }
+.figwrap { overflow: auto; margin: 6px 0 0; max-height: 78vh; border: 1px solid var(--grid); border-radius: 8px; background: var(--surface); }
+svg.graph { display: block; }
+/* 거래 = 화살표. 빨강 = 자금세탁, 파랑 = 정상. 굵기 = 이 시도의 거래인지 */
+.edge { fill: none; stroke-linecap: round; stroke-width: 1.5; }
+.edge.y1 { stroke: var(--laundering); } .edge.y0 { stroke: var(--normal); }
+.edge.own { stroke-width: 3.2; }
+.edge.other { opacity: .85; }
+.edge.missing { stroke-width: 1.8; stroke-dasharray: 6 5; opacity: .55; }
+.edge.out { stroke-width: 2; stroke-dasharray: 1.5 5; }
+.edge.hl { stroke-width: 5; opacity: 1; }
+svg.dim .edge:not(.on):not(.hl), svg.dim .elabel:not(.on), svg.dim .dot:not(.on) { opacity: .12; }
+.ehit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
+.elabel { font-size: 11px; fill: var(--text); paint-order: stroke; stroke: var(--surface); stroke-width: 3.5px; stroke-linejoin: round; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.elabel.own { font-weight: 700; }
+.elabel.other, .elabel.missing { fill: var(--text2); font-weight: 500; }
+.node circle { fill: var(--surface); stroke: var(--axis); stroke-width: 1.5; }
+.node.own circle { stroke: var(--text2); }
+.node text { font-size: 11px; fill: var(--muted); text-anchor: middle; paint-order: stroke; stroke: var(--surface); stroke-width: 3.5px; stroke-linejoin: round; pointer-events: none; }
+.node.own text { fill: var(--text2); font-weight: 600; }
+.node.hl circle { stroke: var(--text); stroke-width: 2.5; }
+.lane line { stroke: var(--grid); stroke-width: 1; }
+.lane.own line { stroke: var(--axis); }
+.lane text { font-size: 11px; fill: var(--muted); }
+.lane text .nm { font-size: 12px; font-weight: 650; fill: var(--muted); }
+.lane.own text .nm { fill: var(--text2); }
+.lane.hl line { stroke: var(--text2); stroke-width: 1.6; }
+.lane.hl text, .lane.hl text .nm { fill: var(--text); }
+line.grid { stroke: var(--grid); stroke-width: 1; }
+line.bound { stroke: var(--text2); stroke-width: 1; stroke-dasharray: 2 3; }
+text.tick { font-size: 11px; fill: var(--muted); }
+text.tick.bound { fill: var(--text2); font-weight: 600; }
+.dot.y1 { fill: var(--laundering); } .dot.y0 { fill: var(--normal); }
+.tx { overflow: auto; max-height: 520px; margin-top: 12px; border: 1px solid var(--grid); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; font-size: 12.5px; }
+th { font-size: 12px; font-weight: 600; color: var(--text2); position: sticky; top: 0; background: var(--surface); box-shadow: 0 1px 0 var(--grid); }
+td.l, th.l { text-align: left; }
+.tx tr.hl td { background: var(--sel); }
+.tx tr.own td:first-child { font-weight: 700; }
+.tx tr.sep td { border-top: 2px solid var(--axis); }
+.key { display: inline-block; width: 16px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 6px; }
+.key.y1 { border-color: var(--laundering); } .key.y0 { border-color: var(--normal); }
+.note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--text); border: 1px solid var(--axis); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.18); max-width: 340px; display: none; }
+#tip b { font-weight: 650; }
+#tip .r { display: flex; justify-content: space-between; gap: 14px; }
+#tip .r span:first-child { color: var(--text2); }
+@media (max-width: 980px) { .main { grid-template-columns: 1fr; } .list { max-height: 36vh; position: static; } .panels { grid-template-columns: minmax(0, 1fr); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>묶음 비교 · 정답 / 생성기 / 단순 연결</h1>
+  <div class="sub" id="sub"></div>
+
+  <div class="card controls">
+    <label>패턴<select id="fType"></select></label>
+    <label>생성기 결과<select id="fG"></select></label>
+    <label>단순 연결 결과<select id="fB"></select></label>
+    <label>시도의 끝<select id="fTail"><option value="">전체</option><option value="0">구간 안에 끝남</option><option value="1">구간 뒤로 이어짐</option></select></label>
+    <label>정렬<select id="fSort"><option value="diff">두 방법의 차이 큰 순</option><option value="gcov">생성기 포함률 낮은 순</option><option value="size">거래 많은 순</option><option value="id">시도 번호 순</option></select></label>
+    <label>시도 번호 찾기<input id="fId" type="search" inputmode="numeric" placeholder="예: 1234"></label>
+  </div>
+
+  <div class="main">
+    <div class="card list" id="list"></div>
+    <div class="card detail" id="detail"></div>
+  </div>
+  <div class="note" id="note"></div>
+</div>
+<div id="tip"></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+</script>
+<script>
+"use strict";
+const M = DATA.meta, T = DATA.tx, NTX = T.id.length, A = DATA.attempts;
+const $ = id => document.getElementById(id);
+const fmtN = n => n.toLocaleString('en-US');
+const fmtAmt = v => v == null ? '' : v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const p2 = v => String(v).padStart(2, '0');
+const MS = i => T.t[i] * 60000;                                            // 거래 시각(ms). 자료에는 분 단위로 들어 있다
+const fmtT = ms => { const d = new Date(ms); return `${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`; };
+const dayLabel = ms => { const d = new Date(ms); return p2(d.getUTCMonth() + 1) + '-' + p2(d.getUTCDate()); };
+const DAY = 86400000;
+const state = { type: '', g: '', b: '', tail: '', sort: 'diff', find: '', sel: null, view: 'flow', tscale: 'time', stack: innerWidth < 1650 };      // 화면이 좁으면 세 그림을 위아래로 놓는다
+// 결과 분류 (평가 구간 안 거래 기준): 포함률 1 = 온전, 묶음 2개 이상 = 쪼개짐, 묶음 0개 = 안 묶임, 나머지 = 일부만
+const VERDICT = ['안 묶임', '일부만', '쪼개짐', '온전'], VMARK = ['✕', '◐', '⑂', '○'];
+const verdict = s => s[1] === 0 ? 0 : s[0] >= 1 ? 3 : s[1] >= 2 ? 2 : 1;
+for (const a of A) { a.vg = verdict(a.g); a.vb = verdict(a.b); }
+const byId = new Map(A.map(a => [a.id, a]));
+const index = arr => { const m = new Map(); for (let i = 0; i < NTX; i++) { const v = arr[i]; if (v < 0) continue; let a = m.get(v); if (!a) m.set(v, a = []); a.push(i); } return m; };
+const byAttempt = index(T.att), byAlert = index(T.al), byComp = index(T.cp);
+const byTime = (p, q) => T.t[p] - T.t[q] || T.id[p] - T.id[q];
+const CIRC = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+const tagOf = k => k <= 20 ? CIRC[k - 1] : `(${k})`;
+
+// ---------------------------------------------------------------- 필터와 목록
+function initControls() {
+  const types = [...new Set(A.map(a => a.p))].sort((x, y) => x - y);
+  $('fType').innerHTML = `<option value="">전체</option>` + types.map(p => `<option value="${p}">${esc(DATA.patterns[p])}</option>`).join('');
+  const vopts = `<option value="">전체</option>` + [3, 2, 1, 0].map(v => `<option value="${v}">${VMARK[v]} ${VERDICT[v]}</option>`).join('');
+  $('fG').innerHTML = vopts; $('fB').innerHTML = vopts;
+  for (const [id, key] of [['fType', 'type'], ['fG', 'g'], ['fB', 'b'], ['fTail', 'tail'], ['fSort', 'sort']]) $(id).onchange = e => { state[key] = e.target.value; render(); };
+  $('fId').oninput = e => { state.find = e.target.value.trim(); render(); };
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    const i = current.findIndex(a => a.id === state.sel); if (!current.length) return;
+    const j = Math.max(0, Math.min(current.length - 1, (i < 0 ? 0 : i + (e.key === 'ArrowDown' ? 1 : -1))));
+    state.sel = current[j].id; e.preventDefault(); renderList(); renderDetail();
+    const el = document.querySelector('.item.sel'); if (el) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+let current = [];
+function render() {
+  const s = state;
+  current = A.filter(a => (s.type === '' || a.p === +s.type) && (s.g === '' || a.vg === +s.g) && (s.b === '' || a.vb === +s.b) && (s.tail === '' || a.after === +s.tail) && (s.find === '' || String(a.id).includes(s.find)));
+  const key = { id: a => a.id, size: a => -a.nin, diff: a => -Math.abs(a.g[0] - a.b[0]), gcov: a => a.g[0] }[s.sort];
+  current.sort((x, y) => key(x) - key(y) || x.id - y.id);
+  if (!current.some(a => a.id === s.sel)) s.sel = current.length ? current[0].id : null;
+  renderList(); renderDetail();
+}
+function renderList() {
+  const el = $('list');
+  if (!current.length) { el.innerHTML = `<div class="listhead">시도 0개</div><div class="empty">조건에 맞는 시도가 없다</div>`; return; }
+  const MAX = 1500, shown = current.slice(0, MAX), part = (v, s, n) => `${VMARK[v]} ${Math.round(s[0] * n)}/${n} · ${s[1]}묶음`;
+  el.innerHTML = `<div class="listhead">시도 ${fmtN(current.length)}개 / 전체 ${fmtN(A.length)}개${current.length > MAX ? ` (앞 ${fmtN(MAX)}개만 표시)` : ''}</div>` + shown.map(a =>
+    `<div class="item${a.id === state.sel ? ' sel' : ''}" data-id="${a.id}">
+      <div class="l1"><span class="id">#${a.id}</span><span class="ty">${esc(DATA.patterns[a.p])}</span></div>
+      <div class="l2"><span>평가 구간 ${a.nin}건${a.n > a.nin ? ` · 구간 밖 ${a.n - a.nin}건` : ''}</span><span>${a.after ? '뒤로 이어짐' : ''}</span></div>
+      <div class="l2"><span>생성기 ${part(a.vg, a.g, a.nin)}</span><span>연결 ${part(a.vb, a.b, a.nin)}</span></div></div>`).join('');
+  el.onclick = e => { const it = e.target.closest('.item'); if (it) { state.sel = +it.dataset.id; renderList(); renderDetail(); } };
+}
+
+// ---------------------------------------------------------------- 자유 배치 (힘 기반, 매번 같은 결과)
+const R = 11;
+function forceLayout(n, pairs) {
+  if (n === 1) return [[0, 0]];
+  const P = Array.from({ length: n }, (_, i) => { const a = 2 * Math.PI * i / n - Math.PI / 2; return [Math.cos(a) * 100, Math.sin(a) * 100]; });
+  const k = 90, iters = n > 200 ? 160 : 400; let t = 40;
+  for (let it = 0; it < iters; it++) {
+    const F = P.map(() => [0, 0]);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d = Math.hypot(dx, dy) || 0.01, f = k * k / d;
+      F[i][0] += dx / d * f; F[i][1] += dy / d * f; F[j][0] -= dx / d * f; F[j][1] -= dy / d * f;
+    }
+    for (const [i, j] of pairs) {
+      let dx = P[i][0] - P[j][0], dy = P[i][1] - P[j][1], d = Math.hypot(dx, dy) || 0.01, f = d * d / k;
+      F[i][0] -= dx / d * f; F[i][1] -= dy / d * f; F[j][0] += dx / d * f; F[j][1] += dy / d * f;
+    }
+    for (let i = 0; i < n; i++) { const m = Math.hypot(F[i][0], F[i][1]) || 0.01, s = Math.min(m, t) / m; P[i][0] += F[i][0] * s; P[i][1] += F[i][1] * s; }
+    t *= 0.99;
+  }
+  return P;
+}
+function freeLayout(n, pairs, W, H) {
+  // 떨어진 덩어리마다 따로 배치한 뒤 줄 맞춰 늘어놓는다
+  const comp = Array.from({ length: n }, (_, i) => i), find = i => comp[i] === i ? i : (comp[i] = find(comp[i]));
+  for (const [i, j] of pairs) comp[find(i)] = find(j);
+  const groups = new Map(); for (let i = 0; i < n; i++) { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); }
+  const boxes = [...groups.values()].map(members => {
+    const local = new Map(members.map((v, i) => [v, i]));
+    const P = forceLayout(members.length, pairs.filter(p => local.has(p[0])).map(p => [local.get(p[0]), local.get(p[1])]));
+    const xs = P.map(p => p[0]), ys = P.map(p => p[1]), x0 = Math.min(...xs), y0 = Math.min(...ys);
+    return { members, P: P.map(p => [p[0] - x0, p[1] - y0]), w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
+  });
+  const GAP = 70, area = boxes.reduce((s, b) => s + (b.w + GAP) * (b.h + GAP), 0), rowW = Math.max(Math.sqrt(area * 1.75), ...boxes.map(b => b.w));
+  let x = 0, y = 0, rowH = 0, cw = 0; const out = new Array(n);
+  for (const b of boxes) {
+    if (x > 0 && x + b.w > rowW) { x = 0; y += rowH + GAP; rowH = 0; }
+    b.members.forEach((v, i) => { out[v] = [x + b.P[i][0], y + b.P[i][1]]; });
+    x += b.w + GAP; rowH = Math.max(rowH, b.h); cw = Math.max(cw, x - GAP);
+  }
+  const ch = y + rowH, padX = 44, padY = 44;
+  const s = Math.max(0.75, Math.min((W - 2 * padX) / Math.max(cw, 1), (H - 2 * padY) / Math.max(ch, 1), 1.9));
+  const vw = Math.max(W, cw * s + 2 * padX), vh = Math.max(H, ch * s + 2 * padY);
+  return { P: out.map(p => [(vw - cw * s) / 2 + p[0] * s, (vh - ch * s) / 2 + p[1] * s]), vw, vh };
+}
+
+// ---------------------------------------------------------------- 흐름 배치: 가로 = 돈이 흐르는 단계 (왼쪽 → 오른쪽), 세로 = 같은 단계 안에서 먼저 나온 계좌가 위
+function flowLayout(n, dpairs, W) {
+  // dpairs: (송금, 수취) 쌍 (중복 · 자기 자신 제외). 사이클을 닫는 쌍은 단계 계산에서 빼고 back 으로 돌려준다
+  const out = Array.from({ length: n }, () => []), indeg = new Array(n).fill(0), back = new Set();
+  const reach = (from, to) => { const st = [from], seen = new Set([from]); while (st.length) { const u = st.pop(); if (u === to) return true; for (const v of out[u]) if (!seen.has(v)) { seen.add(v); st.push(v); } } return false; };
+  for (const [u, v] of dpairs) { if (reach(v, u)) back.add(u + '>' + v); else { out[u].push(v); indeg[v]++; } }
+  const layer = new Array(n).fill(0);
+  for (let it = 0; it < n; it++) { let ch = false; for (let u = 0; u < n; u++) for (const v of out[u]) if (layer[v] < layer[u] + 1) { layer[v] = layer[u] + 1; ch = true; } if (!ch) break; }
+  for (let u = 0; u < n; u++) if (indeg[u] === 0 && out[u].length) layer[u] = Math.min(...out[u].map(v => layer[v])) - 1;   // 보내기만 하는 계좌는 받는 쪽 바로 왼쪽 칸으로
+  const maxL = Math.max(...layer), cols = Array.from({ length: maxL + 1 }, () => []);
+  for (let i = 0; i < n; i++) cols[layer[i]].push(i);                       // i 는 처음 나온 순서라 칸 안에서 그대로 위 → 아래
+  const maxK = Math.max(...cols.map(c => c.length));
+  const padX = 46, padY = 40, rowGap = Math.max(20, Math.min(40, 1500 / maxK)), colGap = Math.max(62, Math.min(240, (W - 2 * padX) / Math.max(maxL, 1)));
+  const cw = maxL * colGap, ch = (maxK - 1) * rowGap;
+  const vw = Math.max(W, cw + 2 * padX), vh = Math.max(230, ch + 2 * padY + 20), P = new Array(n);
+  cols.forEach((c, ci) => c.forEach((v, k) => { P[v] = [(vw - cw) / 2 + ci * colGap, vh / 2 + (k - (c.length - 1) / 2) * rowGap]; }));
+  return { P, vw, vh, back };
+}
+
+// ---------------------------------------------------------------- 그림 1: 구조 그래프 (계좌 = 원, 거래 = 화살표)
+// items: [{i, cls, lab, on}] — 그릴 거래. 순서 = 번호순(이 시도의 거래가 앞). V: 이 시도의 공통 정보(계좌 이름, 거래 번호)
+function drawGraph(items, V, flowMode, W, mk) {
+  const used = [...new Set(items.flatMap(it => [V.idx.get(T.s[it.i]), V.idx.get(T.d[it.i])]))].sort((a, b) => a - b);      // 이 그림에 나오는 계좌 (이름 순서)
+  const loc = new Map(used.map((g, k) => [g, k])), n = used.length, src = it => loc.get(V.idx.get(T.s[it.i])), dst = it => loc.get(V.idx.get(T.d[it.i]));
+  const pairKey = (u, v) => u < v ? u + '|' + v : v + '|' + u, groups = new Map(), deg = new Map();
+  items.forEach((it, k) => { const key = pairKey(src(it), dst(it)); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(k); for (const v of [src(it), dst(it)]) deg.set(v, (deg.get(v) || 0) + 1); });
+  const pairs = [...groups.keys()].map(k => k.split('|').map(Number)).filter(p => p[0] !== p[1]);
+  let P, vw, vh, back = new Set();
+  if (flowMode) {
+    const seen = new Set(), dpairs = [];
+    for (const it of items) { const u = src(it), v = dst(it), k = u + '>' + v; if (u !== v && !seen.has(k)) { seen.add(k); dpairs.push([u, v]); } }
+    ({ P, vw, vh, back } = flowLayout(n, dpairs, W));
+  } else ({ P, vw, vh } = freeLayout(n, pairs, W, 430));
+  const nearNode = (p0, p1, skipA, skipB) => n <= 120 && P.some((q, i) => {                // 선분 p0-p1 이 다른 계좌 원을 스치나
+    if (i === skipA || i === skipB) return false;
+    const dx = p1[0] - p0[0], dy = p1[1] - p0[1], l2 = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((q[0] - p0[0]) * dx + (q[1] - p0[1]) * dy) / l2));
+    return Math.hypot(p0[0] + t * dx - q[0], p0[1] + t * dy - q[1]) < R + 7;
+  });
+  let gEdges = '', gHits = '', gLabels = '';
+  for (const [k, list] of groups) {
+    const [u, v] = k.split('|').map(Number), pu = P[u], pv = P[v], m = list.length;
+    list.forEach((ei, j) => {
+      const it = items[ei]; let d, lx, ly;
+      if (u === v) {                                                          // 자기 계좌로 보낸 거래
+        const r = 22 + j * 11; d = `M ${pu[0] - 7} ${pu[1] - R + 2} C ${pu[0] - r * 1.6} ${pu[1] - r * 2.4}, ${pu[0] + r * 1.6} ${pu[1] - r * 2.4}, ${pu[0] + 7} ${pu[1] - R - 3}`;
+        lx = pu[0]; ly = pu[1] - r * 1.75 - 4;
+      } else {
+        const a0 = src(it) === u ? pu : pv, a1 = src(it) === u ? pv : pu;
+        const dx = pv[0] - pu[0], dy = pv[1] - pu[1], len = Math.hypot(dx, dy) || 1, nx = -dy / len, ny = dx / len;   // 법선은 (작은 번호 → 큰 번호) 기준으로 고정
+        let off = (j - (m - 1) / 2) * 26;
+        if (flowMode && m === 1) {                                            // 흐름 배치: 되돌아오는 거래와 다른 계좌를 지나가는 거래는 휘어서 구분
+          const isBack = back.has(src(it) + '>' + dst(it));
+          if (isBack || nearNode(pu, pv, u, v)) off = (Math.abs(ny) > 0.01 ? Math.sign(ny) : 1) * (isBack ? 1 : -1) * Math.min(34 + len * 0.09, 90);
+        }
+        const cx = (pu[0] + pv[0]) / 2 + nx * off * 2, cy = (pu[1] + pv[1]) / 2 + ny * off * 2;
+        const trim = (p, c, r) => { const tx = c[0] - p[0], ty = c[1] - p[1], tl = Math.hypot(tx, ty) || 1; return [p[0] + tx / tl * r, p[1] + ty / tl * r]; };
+        const s0 = trim(a0, [cx, cy], R + 1), s1 = trim(a1, [cx, cy], R + 9);
+        d = `M ${s0[0].toFixed(1)} ${s0[1].toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${s1[0].toFixed(1)} ${s1[1].toFixed(1)}`;
+        const ds = deg.get(src(it)), dd = deg.get(dst(it)), t = ds < dd ? 0.3 : (ds > dd ? 0.7 : 0.5), q = 1 - t;      // 번호는 선이 덜 몰리는 쪽(거래가 적은 계좌 쪽)에
+        lx = q * q * s0[0] + 2 * q * t * cx + t * t * s1[0]; ly = q * q * s0[1] + 2 * q * t * cy + t * t * s1[1];
+      }
+      gEdges += `<path class="edge ${it.cls}" data-e="${it.i}" d="${d}" marker-end="url(#${mk}-y${T.y[it.i]})"/>`;
+      gHits += `<path class="ehit" data-e="${it.i}" d="${d}"/>`;
+      if (it.lab) gLabels += `<text class="elabel ${it.cls}" data-e="${it.i}" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}">${it.lab}</text>`;
+    });
+  }
+  const names = n <= 90;
+  const gNodes = used.map((g, i) => `<g class="node${g < V.ownN ? ' own' : ''}" data-n="${g}"><circle cx="${P[i][0].toFixed(1)}" cy="${P[i][1].toFixed(1)}" r="${R}"/>${names || g < V.ownN ? `<text x="${P[i][0].toFixed(1)}" y="${(P[i][1] + R + 11).toFixed(1)}">${V.name(g)}</text>` : ''}</g>`).join('');
+  return { vw, vh, body: gEdges + gNodes + gLabels + gHits };
+}
+
+// ---------------------------------------------------------------- 그림 2: 시간축 (계좌 = 줄, 거래 = 그 시각에 송금 줄에서 수취 줄로 가는 화살표)
+// items 는 시간순
+function drawTime(items, V, horiz, W, mk) {
+  const used = [...new Set(items.flatMap(it => [V.idx.get(T.s[it.i]), V.idx.get(T.d[it.i])]))].sort((a, b) => a - b);
+  const loc = new Map(used.map((g, k) => [g, k])), n = items.length, L = used.length, TS = items.map(it => MS(it.i)), ordinal = state.tscale === 'order';
+  const laneGap = horiz ? Math.max(18, Math.min(34, 1400 / L)) : Math.max(34, Math.min(64, 2200 / L)), pad = 22;
+  const m = horiz ? { l: 118, r: 24, t: 30, b: 46 } : { l: 84, r: 24, t: 48, b: 22 };
+  const laneLen = (L - 1) * laneGap;
+  const tLen = horiz ? Math.max(W - m.l - m.r, ordinal ? n * 30 : 0) : Math.max(ordinal ? n * 28 : 480, 280);
+  const vw = horiz ? m.l + tLen + m.r : Math.max(W, m.l + laneLen + m.r + 40);
+  const vh = horiz ? m.t + laneLen + m.b : m.t + tLen + m.b;
+  const laneOff = horiz ? m.t : m.l + ((vw - m.l - m.r) - laneLen) / 2;       // 세로 보기는 줄들을 가운데로
+  const t0 = TS[0], span = Math.max(TS[n - 1] - t0, 60000);
+  const lin = ms => pad + (ms - t0) / span * (tLen - 2 * pad);
+  const tp = i => ordinal ? (n === 1 ? tLen / 2 : pad + i * (tLen - 2 * pad) / (n - 1)) : lin(TS[i]);
+  const XY = (t, l) => horiz ? [m.l + t, laneOff + l] : [laneOff + l, m.t + t];
+  const f = v => v.toFixed(1);
+  const cross = (t, cls, label, where) => {                                 // 시간 방향에 수직인 선 하나 + 글자
+    const [x0, y0] = XY(t, -14), [x1, y1] = XY(t, laneLen + 14);
+    let txt = '';
+    const anchor = t > tLen * 0.85 ? 'end' : (t < tLen * 0.15 && where === 'far' ? 'start' : 'middle');
+    if (label) txt = horiz
+      ? `<text class="tick ${cls}" x="${f(x0)}" y="${where === 'far' ? f(y0 - 5) : f(y1 + 15)}" text-anchor="${where === 'far' ? anchor : 'middle'}">${label}</text>`
+      : (where === 'far' ? `<text class="tick ${cls}" x="${f(x1)}" y="${f(y0 - 5)}" text-anchor="end">${label}</text>`
+                         : `<text class="tick ${cls}" x="${f(m.l - 10)}" y="${f(y0)}" text-anchor="end" dominant-baseline="central">${label}</text>`);
+    return `<line class="${cls}" x1="${f(x0)}" y1="${f(y0)}" x2="${f(x1)}" y2="${f(y1)}"/>` + txt;
+  };
+  let g = '';
+  if (!ordinal) {                                                             // 시간 눈금
+    const steps = [600000, 1800000, 3600000, 3 * 3600000, 6 * 3600000, 12 * 3600000, DAY, 2 * DAY, 7 * DAY, 14 * DAY, 28 * DAY];
+    const step = steps.find(st => span / st <= (horiz ? Math.max(3, Math.floor(tLen / 90)) : 12)) || steps[steps.length - 1];
+    for (let ms = Math.ceil(t0 / step) * step; ms <= TS[n - 1]; ms += step) {
+      const d = new Date(ms), midnight = d.getUTCHours() === 0 && d.getUTCMinutes() === 0;
+      g += cross(lin(ms), 'grid', midnight ? dayLabel(ms) : p2(d.getUTCHours()) + ':' + p2(d.getUTCMinutes()), 'axis');
+    }
+    if (span <= 60000 || Math.ceil(t0 / step) * step > TS[n - 1]) g += cross(lin(t0), 'grid', fmtT(t0), 'axis');
+  } else {
+    const gap = n > 1 ? (tLen - 2 * pad) / (n - 1) : 0;
+    for (let i = 0; i < n; i++) if (i === 0 || Math.floor(TS[i] / DAY) !== Math.floor(TS[i - 1] / DAY)) g += cross(tp(i) - (i ? gap / 2 : 10), 'grid', dayLabel(TS[i]) + ' ~', 'axis');
+  }
+  // 평가 구간 경계
+  const ws = Date.parse(M.window[0] + 'T00:00:00Z'), we = Date.parse(M.window[1] + 'T00:00:00Z') + DAY;
+  if (!ordinal) { for (const [ms, lab] of [[ws, '평가 구간 시작'], [we, '평가 구간 끝']]) if (ms > t0 && ms < TS[n - 1]) g += cross(lin(ms), 'bound', lab, 'far'); }
+  else for (let i = 1; i < n; i++) if (T.win[items[i].i] !== T.win[items[i - 1].i]) g += cross((tp(i) + tp(i - 1)) / 2, 'bound', T.win[items[i].i] ? '평가 구간 시작' : '평가 구간 끝', 'far');
+  // 계좌 줄
+  used.forEach((gi, i) => {
+    const [x0, y0] = XY(0, i * laneGap), [x1, y1] = XY(tLen, i * laneGap);
+    const lab = horiz
+      ? `<text x="${f(m.l - 12)}" y="${f(y0)}" text-anchor="end" dominant-baseline="central"><tspan class="nm">${V.name(gi)}</tspan> ${V.ids[gi]}</text>`
+      : `<text x="${f(x0)}" y="${f(m.t - 16)}" text-anchor="middle"><tspan class="nm">${V.name(gi)}</tspan><title>${V.ids[gi]}</title></text>`;
+    g += `<g class="lane${gi < V.ownN ? ' own' : ''}" data-n="${gi}"><line x1="${f(x0)}" y1="${f(y0)}" x2="${f(x1)}" y2="${f(y1)}"/>${lab}</g>`;
+  });
+  g += horiz ? `<text class="tick" x="${f(m.l + tLen)}" y="${f(vh - 6)}" text-anchor="end">시간 →${ordinal ? ' (순서대로 같은 간격)' : ''}</text>`
+             : `<text class="tick" x="10" y="16">시간 ↓${ordinal ? ' (순서대로 같은 간격)' : ''}</text>`;
+  let gE = '', gH = '', gL = '';
+  items.forEach((it, ei) => {
+    const t = tp(ei), a = loc.get(V.idx.get(T.s[it.i])) * laneGap, b = loc.get(V.idx.get(T.d[it.i])) * laneGap, [sx, sy] = XY(t, a), y = T.y[it.i];
+    let d, lx, ly;
+    if (a === b) {                                                            // 자기 계좌로 보낸 거래: 줄 위의 작은 고리
+      d = `M ${f(sx - 7)} ${f(sy)} a 7 7 0 1 1 14 0 a 7 7 0 1 1 -14 0`; [lx, ly] = horiz ? [sx, sy - 16] : [sx - 18, sy];
+      gE += `<path class="edge ${it.cls}" data-e="${it.i}" d="${d}"/>`;
+    } else {
+      const sg = b > a ? 1 : -1, [ex, ey] = XY(t, b - sg * 10);
+      d = `M ${f(sx)} ${f(sy)} L ${f(ex)} ${f(ey)}`; [lx, ly] = horiz ? [sx, sy - sg * 12] : [sx - sg * 14, sy];
+      gE += `<path class="edge ${it.cls}" data-e="${it.i}" d="${d}" marker-end="url(#${mk}-y${y})"/><circle class="dot y${y}${it.on ? ' ' + it.on : ''}" data-e="${it.i}" cx="${f(sx)}" cy="${f(sy)}" r="3.2"/>`;
+    }
+    gH += `<path class="ehit" data-e="${it.i}" d="${d}"/>`;
+    if (it.lab) gL += `<text class="elabel ${it.cls}" data-e="${it.i}" x="${f(lx)}" y="${f(ly)}">${it.lab}</text>`;
+  });
+  return { vw, vh, body: g + gE + gL + gH };
+}
+
+// ---------------------------------------------------------------- 한 시도: 세 그림 + 표
+function groupsOf(truth, col, idx, own) {
+  const ids = [...new Set(truth.map(i => col[i]).filter(v => v >= 0))];
+  return ids.map(id => { const tx = idx.get(id) || []; return { id, tx, own: tx.filter(i => T.att[i] === own).length }; }).sort((a, b) => b.own - a.own || a.id - b.id);
+}
+function renderDetail() {
+  const el = $('detail'), a = byId.get(state.sel);
+  if (!a) { el.innerHTML = `<div class="empty">왼쪽에서 시도를 고르면 여기에 그려진다</div>`; return; }
+  try { history.replaceState(null, '', '#attempt=' + a.id); } catch (e) {}
+  const own = a.id, truth = (byAttempt.get(own) || []).slice().sort(byTime), truthIn = truth.filter(i => T.win[i]);
+  const G = groupsOf(truth, T.al, byAlert, own), B = groupsOf(truth, T.cp, byComp, own);
+  const gSet = new Set(G.flatMap(g => g.tx)), bSet = new Set(B.flatMap(g => g.tx));
+  const others = [...new Set([...gSet, ...bSet])].filter(i => T.att[i] !== own).sort(byTime);
+  // 거래 번호: 이 시도의 거래가 시간순으로 1, 2, 3…, 그 뒤로 같이 묶인 다른 거래가 시간순. 세 그림과 아래 표가 같은 번호를 쓴다
+  const all = [...truth, ...others], num = new Map(all.map((i, k) => [i, k + 1]));
+  // 계좌 이름: 번호순으로 처음 나온 순서대로 A, B, C… (이 시도의 계좌가 앞). 세 그림이 같은 이름을 쓴다
+  const ids = [], idx = new Map();
+  for (const i of truth) for (const v of [T.s[i], T.d[i]]) if (!idx.has(v)) { idx.set(v, ids.length); ids.push(v); }
+  const ownN = ids.length;
+  for (const i of others) for (const v of [T.s[i], T.d[i]]) if (!idx.has(v)) { idx.set(v, ids.length); ids.push(v); }
+  const name = g => String.fromCharCode(65 + (g % 26)) + (g >= 26 ? Math.floor(g / 26) : '');
+  const V = { ids, idx, ownN, name, num };
+
+  const panelItems = (set, groups) => {                                      // 그릴 거래 목록. set 이 없으면 정답 그림
+    const ord = new Map(); if (groups && groups.length > 1) groups.forEach((g, k) => g.tx.forEach(i => ord.set(i, k + 1)));
+    const list = set ? [...set, ...truthIn.filter(i => !set.has(i))] : truth, labelAll = list.length <= 70;
+    return list.sort((p, q) => num.get(p) - num.get(q)).map(i => {
+      const mine = T.att[i] === own, miss = set && !set.has(i), out = !set && !T.win[i];
+      return { i, cls: `y${T.y[i]} ${mine ? 'own' : 'other'}${miss ? ' missing' : ''}${out ? ' out' : ''}`, lab: mine || labelAll ? (miss ? '✕' : '') + num.get(i) + (ord.has(i) ? tagOf(ord.get(i)) : '') : '' };
+    });
+  };
+  const PANELS = [{ key: 'truth', title: '① 정답 · 세탁 시도', set: null, groups: null, stat: null, word: '' },
+                  { key: 'g', title: '② 생성기 Alert', set: gSet, groups: G, stat: a.g, word: 'Alert' },
+                  { key: 'b', title: '③ 단순 연결', set: bSet, groups: B, stat: a.b, word: '묶음' }];
+  const isGraph = state.view === 'flow' || state.view === 'graph';
+  const segBtn = (key, v, label) => `<button data-k="${key}" data-v="${v}" aria-pressed="${String(state[key]) === String(v)}">${label}</button>`;
+  const hint = state.view === 'flow' ? '왼쪽 → 오른쪽 = 돈이 흐르는 순서, 위 → 아래 = 먼저 나온 계좌. 휜 화살표 = 앞 단계로 되돌아오는 거래' : state.view === 'graph' ? '원 = 계좌, 화살표 = 거래 (위치에 뜻 없음)'
+    : (state.view === 'timeh' ? '가로 = 시간, 줄 = 계좌. 화살표는 그 시각에 송금 계좌 줄(점)에서 수취 계좌 줄로' : '세로 = 시간 (위에서 아래로), 줄 = 계좌. 화살표는 그 시각에 송금 계좌 줄(점)에서 수취 계좌 줄로');
+  const sw = (cls, extra) => `<svg width="34" height="10"><path class="edge ${cls}" d="M2 5 H32"${extra || ''}/></svg>`;
+  const facts = p => {
+    if (!p.set) { const out = truth.length - truthIn.length; return `이 시도의 거래 <b>${truth.length}건</b> · 계좌 <b>${ownN}개</b>${out ? `<br>그중 ${out}건은 평가 구간 밖이라 씨앗이 될 수 없다 (점선)` : '<br>전부 평가 구간 안'}`; }
+    const inGroup = truthIn.filter(i => p.set.has(i)).length; let otherL = 0, normal = 0;
+    for (const i of p.set) { if (T.att[i] === own) continue; if (T.y[i]) otherL++; else normal++; }
+    const best = p.groups.length ? Math.max(...p.groups.map(g => g.tx.filter(i => T.att[i] === own && T.win[i]).length)) : 0;
+    return `${p.word} <b>${p.groups.length}개</b> · 이 시도 ${truthIn.length}건 중 <b>${inGroup}건</b> 포함${p.groups.length > 1 ? ` (가장 큰 ${p.word}에 ${best}건)` : ''}<br>같이 묶인 다른 세탁 거래 <b>${otherL}건</b> · 정상 거래 <b>${normal}건</b>`;
+  };
+  const chips = p => !p.groups ? '' : p.groups.map((g, k) => `<button class="chip" data-p="${p.key}" data-g="${k}">${p.groups.length > 1 ? tagOf(k + 1) + ' ' : ''}${p.word} ${g.id} · ${g.tx.length}건 (이 시도 ${g.own})</button>`).join('');
+  const first = truth.length ? fmtT(MS(truth[0])) : '', last = truth.length ? fmtT(MS(truth[truth.length - 1])) : '';
+
+  // 표: 번호순 (이 시도의 거래 먼저)
+  const rows = all.map((i, k) => {
+    const mine = T.att[i] === own, seed = ['', '모델', '보강'][T.seed[i]] || '';
+    const att = T.att[i] < 0 ? (T.y[i] ? '패턴 없는 세탁' : '') : `#${T.att[i]} ${esc(DATA.patterns[T.pt[i]] || '')}${mine ? ' (이 시도)' : ''}`;
+    const gcell = T.al[i] >= 0 ? `Alert ${T.al[i]}${T.role[i] === 2 ? ' · 연결 거래' : ''}` : T.seed[i] ? `탈락 · ${esc(DATA.reasons[T.rs[i]] || '')}` : T.win[i] ? '씨앗 아님' : '구간 밖';
+    const bcell = T.cp[i] >= 0 ? `묶음 ${T.cp[i]}` : T.seed[i] ? '혼자 남음' : T.win[i] ? '씨앗 아님' : '구간 밖';
+    return `<tr data-e="${i}" class="${mine ? 'own' : ''}${k === truth.length ? ' sep' : ''}"><td>${k + 1}</td><td class="l"><span class="key y${T.y[i]}"></span>${T.y[i] ? '세탁' : '정상'}</td><td>${fmtT(MS(i))}</td>
+      <td class="l"><b>${name(idx.get(T.s[i]))}</b> ${T.s[i]}</td><td class="l"><b>${name(idx.get(T.d[i]))}</b> ${T.d[i]}</td><td>${fmtAmt(T.usd[i])}</td><td class="l">${att}</td>
+      <td>${T.sc[i] == null ? '–' : T.sc[i].toFixed(4)}</td><td class="l">${seed}</td><td class="l">${gcell}</td><td class="l">${bcell}</td></tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="dhead"><h2>시도 #${a.id} · ${esc(DATA.patterns[a.p])}</h2>
+      <div class="desc">거래 ${truth.length}건 (평가 구간 안 ${truthIn.length}건) · 계좌 ${ownN}개 · ${first} ~ ${last}${a.after ? ' · 평가 구간 뒤로 이어지는 시도' : ''}</div></div>
+    <div class="viewbar"><span class="seg">${segBtn('view', 'flow', '흐름 순서')}${segBtn('view', 'graph', '자유 배치')}${segBtn('view', 'timeh', '시간축 가로')}${segBtn('view', 'timev', '시간축 세로')}</span>
+      ${isGraph ? '' : `<span class="seg">${segBtn('tscale', 'time', '실제 시간 간격')}${segBtn('tscale', 'order', '순서대로')}</span>`}
+      <span class="seg">${segBtn('stack', false, '나란히')}${segBtn('stack', true, '위아래로 크게')}</span><span class="hint">${hint}</span></div>
+    <div class="legend"><span>${sw('y1 own')}자금세탁 거래</span><span>${sw('y0 own')}정상 거래</span><span>${sw('y1 own')}굵은 선 = 이 시도의 거래</span><span>${sw('y1 other')}가는 선 = 같이 묶인 다른 거래</span>
+      <span>${sw('y1 missing')}✕ 정답인데 묶음에 없음</span><span>${sw('y1 out')}평가 구간 밖 (정답 그림만)</span><span>숫자 = 거래 번호 (아래 표의 #) · 글자 = 계좌 · ①② = 몇 번째 묶음인지</span></div>
+    <div class="panels${state.stack ? ' stack' : ''}">${PANELS.map(p => `<section class="panel" data-p="${p.key}">
+      <h3>${p.title}${p.stat ? ` <span class="verdict">${VMARK[verdict(p.stat)]} ${VERDICT[verdict(p.stat)]}</span>` : ''}</h3>
+      <div class="facts">${facts(p)}</div><div class="chips">${chips(p)}</div><div class="figwrap"></div></section>`).join('')}</div>
+    <div class="tx"><table><tr><th>#</th><th class="l">라벨</th><th>시각</th><th class="l">송금 계좌</th><th class="l">수취 계좌</th><th>금액 (USD)</th><th class="l">시도</th><th>모델 점수</th><th class="l">씨앗</th><th class="l">생성기</th><th class="l">단순 연결</th></tr>${rows}</table></div>`;
+
+  // 그림: 칸 너비를 잰 뒤 그 너비에 맞춰 그린다 (글자 크기가 줄지 않게). 넘치면 칸 안에서 스크롤
+  for (const p of PANELS) {
+    const sec = el.querySelector(`.panel[data-p="${p.key}"]`), wrap = sec.querySelector('.figwrap'), W = Math.max(320, wrap.clientWidth - 2), mk = 'ar-' + p.key;
+    const items = panelItems(p.set, p.groups);
+    if (!items.length) { wrap.innerHTML = `<div class="empty">묶음 없음</div>`; continue; }
+    const fig = isGraph ? drawGraph(items, V, state.view === 'flow', W, mk) : drawTime(items.slice().sort((x, y) => byTime(x.i, y.i)), V, state.view === 'timeh', W, mk);
+    const marker = y => `<marker id="${mk}-y${y}" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0.8 L9 5 L0 9.2 z" fill="var(--${y ? 'laundering' : 'normal'})"/></marker>`;
+    wrap.innerHTML = `<svg class="graph" width="${fig.vw.toFixed(0)}" height="${fig.vh.toFixed(0)}" viewBox="0 0 ${fig.vw.toFixed(0)} ${fig.vh.toFixed(0)}" role="img" aria-label="${p.title} 그림: 거래 ${items.length}건"><defs>${marker(1)}${marker(0)}</defs>${fig.body}</svg>`;
+    // 그림이 칸보다 크면 이 시도의 거래가 보이는 자리로 스크롤해 둔다
+    if (wrap.scrollWidth > wrap.clientWidth + 2 || wrap.scrollHeight > wrap.clientHeight + 2) {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      wrap.querySelectorAll('.edge.own').forEach(e => { const b = e.getBBox(); x0 = Math.min(x0, b.x); x1 = Math.max(x1, b.x + b.width); y0 = Math.min(y0, b.y); y1 = Math.max(y1, b.y + b.height); });
+      if (x0 < Infinity) { wrap.scrollLeft = Math.max(0, (x0 + x1) / 2 - wrap.clientWidth / 2); wrap.scrollTop = Math.max(0, (y0 + y1) / 2 - wrap.clientHeight / 2); }
+    }
+  }
+
+  el.querySelector('.viewbar').onclick = ev => { const b = ev.target.closest('button'); if (!b) return; state[b.dataset.k] = b.dataset.k === 'stack' ? b.dataset.v === 'true' : b.dataset.v; renderDetail(); };
+  // 묶음 버튼: 그 묶음의 거래만 남기고 흐리게
+  el.querySelectorAll('.chip').forEach(c => {
+    const p = PANELS.find(x => x.key === c.dataset.p), g = p.groups[+c.dataset.g], svg = el.querySelector(`.panel[data-p="${p.key}"] svg.graph`);
+    const set = on => { if (!svg) return; svg.classList.toggle('dim', on); c.classList.toggle('on', on); for (const i of g.tx) svg.querySelectorAll(`[data-e="${i}"]`).forEach(x => x.classList.toggle('on', on)); };
+    c.addEventListener('mouseenter', () => set(true)); c.addEventListener('mouseleave', () => set(false)); c.addEventListener('focus', () => set(true)); c.addEventListener('blur', () => set(false));
+  });
+  // 호버: 같은 거래를 세 그림과 표에서 같이 강조
+  const tip = $('tip');
+  const hl = (i, on) => {
+    el.querySelectorAll(`.edge[data-e="${i}"], .tx tr[data-e="${i}"]`).forEach(x => x.classList.toggle('hl', on));
+    for (const v of [T.s[i], T.d[i]]) el.querySelectorAll(`[data-n="${idx.get(v)}"]`).forEach(g => g.classList.toggle('hl', on));
+  };
+  const place = ev => { const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight; let x = ev.clientX + pad, y = ev.clientY + pad; if (x + w > innerWidth - 8) x = ev.clientX - w - pad; if (y + h > innerHeight - 8) y = ev.clientY - h - pad; tip.style.left = Math.max(8, x) + 'px'; tip.style.top = Math.max(8, y) + 'px'; };
+  tip.style.display = 'none';
+  el.querySelectorAll('.ehit').forEach(pth => {
+    const i = +pth.dataset.e;
+    pth.addEventListener('mouseenter', ev => {
+      hl(i, true);
+      const mine = T.att[i] === own, r = (k, v) => `<div class="r"><span>${k}</span><span>${v}</span></div>`;
+      tip.innerHTML = `<div><b>#${num.get(i)} · ${T.y[i] ? '자금세탁 거래' : '정상 거래'}</b></div>` + r('시각', fmtT(MS(i)) + (T.win[i] ? '' : ' (평가 구간 밖)')) +
+        r(`${name(idx.get(T.s[i]))} → ${name(idx.get(T.d[i]))}`, T.usd[i] == null ? '금액 모름' : fmtAmt(T.usd[i]) + ' USD') +
+        r('시도', T.att[i] < 0 ? (T.y[i] ? '패턴 없는 세탁' : '없음') : `#${T.att[i]} ${esc(DATA.patterns[T.pt[i]] || '')}${mine ? ' (이 시도)' : ''}`) +
+        r('모델 점수', T.sc[i] == null ? '없음' : T.sc[i].toFixed(4) + (T.seed[i] === 1 ? ' · 씨앗' : T.seed[i] === 2 ? ' · 보강으로 씨앗' : ' · 씨앗 아님')) +
+        r('생성기', T.al[i] >= 0 ? `Alert ${T.al[i]}${T.role[i] === 2 ? ' (연결 거래)' : ''}` : T.seed[i] ? `탈락: ${esc(DATA.reasons[T.rs[i]] || '')}` : '해당 없음') +
+        r('단순 연결', T.cp[i] >= 0 ? `묶음 ${T.cp[i]}` : T.seed[i] ? '혼자 남음' : '해당 없음');
+      tip.style.display = 'block'; place(ev);
+    });
+    pth.addEventListener('mousemove', place);
+    pth.addEventListener('mouseleave', () => { hl(i, false); tip.style.display = 'none'; });
+  });
+  el.querySelectorAll('.tx tr[data-e]').forEach(r => { const i = +r.dataset.e; r.addEventListener('mouseenter', () => hl(i, true)); r.addEventListener('mouseleave', () => hl(i, false)); });
+}
+
+$('sub').textContent = `${M.dataset} · 평가 구간 ${M.window[0]} ~ ${M.window[1]} · 모델 ${M.model} · 의심 기준 ${M.threshold} · 씨앗 보강 ${M.promotion} · 단순 연결 = ${M.baseline}`;
+$('note').textContent = `씨앗 ${fmtN(M.seeds)}건 · Alert ${fmtN(M.alerts)}개 · 단순 연결 묶음 ${fmtN(M.components)}개. 결과 분류는 평가 구간 안 거래 기준이다: ○ 온전 = 전부 한 묶음, ⑂ 쪼개짐 = 두 묶음 이상에 나뉨, ◐ 일부만 = 한 묶음에 일부만, ✕ 안 묶임 = 어느 묶음에도 없음. 세 그림은 같은 거래에 같은 번호, 같은 계좌에 같은 글자를 쓴다. 방향키 ↑ ↓ 로 시도를 넘길 수 있다.`;
+const fromHash = () => { const h = +(location.hash.match(/attempt=(\d+)/) || [])[1]; return byId.has(h) ? h : null; };
+state.sel = fromHash();
+initControls(); render();
+addEventListener('hashchange', () => { const h = fromHash(); if (h !== null && h !== state.sel) { state.sel = h; renderList(); renderDetail(); } });
+let resizeTimer = null;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDetail, 180); });
+</script>
+</body>
+</html>

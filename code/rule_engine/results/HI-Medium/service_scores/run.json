@@ -1,0 +1,35 @@
+{
+  "name": "multi280_hgb36_v1",
+  "dataset": "HI-Medium",
+  "val": {
+    "threshold": 0.194997844
+  },
+  "seed_low": 0.1,
+  "chain_floor": 0.01,
+  "eval_window": [
+    "2022-09-08",
+    "2022-09-16"
+  ],
+  "warmup_days": 7,
+  "data_start": "2022-09-01",
+  "batch_size": 2048,
+  "sampling_seed": 42,
+  "device": "cuda",
+  "service_commit": "ce5b429 2026-11-19 Merge pull request #227 from dh0728/backend",
+  "self_check": {
+    "기대_건수": 18,
+    "채점_건수": 18,
+    "짝이_안_맞는_거래": 0,
+    "최대_차이": 1.695792361533499e-07,
+    "허용_오차_2e_6_안": true
+  },
+  "inputs": {
+    "거래": 31891231,
+    "계좌": 2077023,
+    "유형을_비운_계좌": 0,
+    "유형_없는_계좌": 0,
+    "국가_없는_계좌": 775280
+  },
+  "rows": 16955723,
+  "laundering": 19786
+}
